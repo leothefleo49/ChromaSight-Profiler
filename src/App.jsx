@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 
-// --- SOUND & HAPTIC ENGINE ---
 const playSound = (type) => {
   try {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -39,41 +38,36 @@ const playSound = (type) => {
 
 const triggerHaptic = () => {
   if (typeof window !== 'undefined' && navigator.vibrate) {
-    try { navigator.vibrate(30); } catch (e) {}
+    try { navigator.vibrate([30, 20, 30]); } catch (e) {}
   }
 };
 
-// --- ISHIHARA PLATE GENERATION DATA ---
 const NUMBERS = [3, 5, 6, 8, 9, 12, 15, 29, 45, 73, 74, 97];
 
-// Configuration for generating the plates progressively
 const generateTestPlates = () => {
   const plates = [];
   
-  // 1. Control Plate (Easy for everyone)
+  // Control Plate
   plates.push({
     id: 'control', axis: 'control', level: 0,
-    number: 12, // Always 12 for control
-    bgHue: 220, targetHue: 10, // Blue bg, Red target
+    number: 12,
+    bgHue: 220, targetHue: 10,
     hNoise: 15,
   });
 
   const getRandNum = () => NUMBERS[Math.floor(Math.random() * NUMBERS.length)];
 
-  // 2. Deutan Plates (Green weakness)
-  // Background: Orange/Reds (Hue 15-40), Target: Greens (Hue 100-140)
+  // Deutan Plates (Green weakness)
   for (let i = 1; i <= 5; i++) {
     plates.push({
       id: `deutan-${i}`, axis: 'deutan', level: i,
       number: getRandNum(),
       bgHue: 25, targetHue: 120,
-      // As level increases, we inject more hue noise to blend the bounds
       hNoise: i * 8, 
     });
   }
 
-  // 3. Protan Plates (Red weakness)
-  // Background: Greens/Olives (Hue 80-110), Target: Reds/Pinks (Hue 350-10)
+  // Protan Plates (Red weakness)
   for (let i = 1; i <= 5; i++) {
     plates.push({
       id: `protan-${i}`, axis: 'protan', level: i,
@@ -83,8 +77,7 @@ const generateTestPlates = () => {
     });
   }
 
-  // 4. Tritan Plates (Blue/Yellow weakness)
-  // Background: Blues (Hue 190-220), Target: Yellows/Pinks (Hue 50 or 330)
+  // Tritan Plates (Blue/Yellow weakness)
   for (let i = 1; i <= 5; i++) {
     plates.push({
       id: `tritan-${i}`, axis: 'tritan', level: i,
@@ -104,9 +97,14 @@ export default function App() {
   const [scores, setScores] = useState({ deutan: 0, protan: 0, tritan: 0 });
   const [inputValue, setInputValue] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
   const canvasRef = useRef(null);
 
-  // Start the test
+  const showToast = (msg) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(''), 2500);
+  };
+
   const startTest = () => {
     playSound('tap');
     triggerHaptic();
@@ -118,7 +116,6 @@ export default function App() {
     setPhase('testing');
   };
 
-  // Rendering the Canvas Plate
   const renderPlate = useCallback(async () => {
     if (phase !== 'testing' || !plates[currentIndex]) return;
     const canvas = canvasRef.current;
@@ -126,14 +123,13 @@ export default function App() {
 
     setIsGenerating(true);
     
-    // We use a timeout to allow UI to show loading state before blocking main thread
     setTimeout(() => {
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       const width = canvas.width;
       const height = canvas.height;
       const plate = plates[currentIndex];
 
-      // 1. Draw the hidden text mask
+      // Draw hidden text mask
       const maskCanvas = document.createElement('canvas');
       maskCanvas.width = width;
       maskCanvas.height = height;
@@ -141,35 +137,32 @@ export default function App() {
       mCtx.fillStyle = 'black';
       mCtx.fillRect(0, 0, width, height);
       mCtx.fillStyle = 'white';
-      mCtx.font = 'bold 220px Arial, Helvetica, sans-serif'; // Thick, standard font
+      mCtx.font = 'bold 220px Arial, Helvetica, sans-serif';
       mCtx.textAlign = 'center';
       mCtx.textBaseline = 'middle';
       mCtx.fillText(plate.number.toString(), width / 2, height / 2);
       const imgData = mCtx.getImageData(0, 0, width, height).data;
 
-      // 2. Clear visible canvas & draw boundary circle
+      // Clear main canvas & draw base circular plate
       ctx.clearRect(0, 0, width, height);
       ctx.beginPath();
-      ctx.arc(width/2, height/2, width/2 - 2, 0, Math.PI*2);
-      ctx.fillStyle = '#E2E8F0'; // Base plate color behind dots
+      ctx.arc(width/2, height/2, width/2 - 2, 0, Math.PI * 2);
+      ctx.fillStyle = '#E2E8F0';
       ctx.fill();
 
-      // 3. Circle Packing Algorithm
+      // Circle packing algorithm
       const circles = [];
-      const maxAttempts = 60000;
-      const maxCircles = 1600;
+      const maxAttempts = 50000;
+      const maxCircles = 1500;
 
       for (let i = 0; i < maxAttempts; i++) {
-        // Favor smaller circles as we get denser
         let r = Math.random() > 0.85 ? 12 : Math.random() > 0.5 ? 8 : 4.5;
         let x = Math.random() * width;
         let y = Math.random() * height;
 
-        // Keep inside circular plate
         let distToCenter = Math.sqrt(Math.pow(x - width/2, 2) + Math.pow(y - height/2, 2));
         if (distToCenter + r > width/2 - 4) continue;
 
-        // Check overlap
         let overlap = false;
         for (let j = 0; j < circles.length; j++) {
           let c = circles[j];
@@ -187,37 +180,32 @@ export default function App() {
         }
       }
 
-      // 4. Draw Packed Circles based on Mask
+      // Draw packed colored dots with luminance noise
       circles.forEach(c => {
         const pixelIndex = (Math.floor(c.y) * width + Math.floor(c.x)) * 4;
-        const isTarget = imgData[pixelIndex] > 128; // White text mask
+        const isTarget = imgData[pixelIndex] > 128;
 
         let baseHue = isTarget ? plate.targetHue : plate.bgHue;
-        // Inject hue noise
         let hue = baseHue + (Math.random() - 0.5) * plate.hNoise;
-        
-        // Massive lightness & saturation noise to prevent contrast cheating
-        let sat = 60 + Math.random() * 30; // 60% to 90%
-        let light = 35 + Math.random() * 40; // 35% to 75%
+        let sat = 60 + Math.random() * 30;
+        let light = 35 + Math.random() * 40;
 
         ctx.beginPath();
-        ctx.arc(c.x, c.y, c.r, 0, Math.PI*2);
+        ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
         ctx.fillStyle = `hsl(${hue}, ${sat}%, ${light}%)`;
         ctx.fill();
       });
 
       setIsGenerating(false);
-    }, 50);
+    }, 40);
   }, [phase, currentIndex, plates]);
 
-  // Re-render when plate index changes
   useEffect(() => {
     if (phase === 'testing') {
       renderPlate();
     }
   }, [phase, currentIndex, renderPlate]);
 
-  // Handle Numpad input
   const handleInput = (num) => {
     if (inputValue.length < 2) {
       playSound('tap');
@@ -232,13 +220,10 @@ export default function App() {
     setInputValue('');
   };
 
-  // Submit Answer
   const submitAnswer = (userAnswer) => {
     playSound('tap');
     triggerHaptic();
     const plate = plates[currentIndex];
-    
-    // Parse user answer ('nothing' = -1)
     const isCorrect = parseInt(userAnswer) === plate.number;
 
     if (isCorrect && plate.axis !== 'control') {
@@ -248,7 +233,6 @@ export default function App() {
       }));
     }
 
-    // Move to next or finish
     if (currentIndex < plates.length - 1) {
       setInputValue('');
       setCurrentIndex(prev => prev + 1);
@@ -258,13 +242,11 @@ export default function App() {
     }
   };
 
-  // --- RESULT CALCULATION ---
   const resultData = useMemo(() => {
     if (phase !== 'result') return null;
 
-    // Total possible per axis is 5.
     let lowestScore = 5;
-    let worstAxis = 'off'; // default normal
+    let worstAxis = 'off';
 
     Object.entries(scores).forEach(([axis, score]) => {
       if (score < lowestScore) {
@@ -278,11 +260,10 @@ export default function App() {
         type: 'off',
         diagnosis: 'Normal Color Vision',
         strength: 0,
-        desc: 'You accurately passed the Ishihara plates across all spectrums.'
+        desc: 'You accurately identified the Ishihara numbers across all spectrums.'
       };
     }
 
-    // Calculate strength: Score 0 = 1.0 (Severe), Score 3 = 0.4 (Mild)
     let rawStrength = (5 - lowestScore) / 5.0;
     const strength = parseFloat(Math.max(0.1, Math.min(1.0, rawStrength)).toFixed(2));
 
@@ -298,7 +279,7 @@ export default function App() {
       type: mapping[worstAxis].key,
       diagnosis: `${severity} ${mapping[worstAxis].name}`,
       strength: strength,
-      desc: `You scored ${lowestScore}/5 on the ${worstAxis} axis. This indicates difficulty distinguishing hues along this specific light spectrum.`
+      desc: `You scored ${lowestScore}/5 on the ${worstAxis} axis. This indicates difficulty distinguishing hues along this specific spectrum.`
     };
   }, [phase, scores]);
 
@@ -308,7 +289,7 @@ export default function App() {
       strength: resultData.strength
     }, null, 2);
     navigator.clipboard.writeText(jsonStr);
-    alert('Profile copied to clipboard! Paste this directly into Colorfle Unlimited settings.');
+    showToast('Profile copied to clipboard!');
   };
 
   const downloadProfile = () => {
@@ -322,22 +303,30 @@ export default function App() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+    showToast('Profile downloaded!');
   };
 
   return (
-    <div className="fixed inset-0 w-full h-full bg-[#0F111A] text-slate-100 font-sans flex flex-col items-center justify-center overflow-hidden selection:bg-purple-500 selection:text-white">
+    <div className="fixed inset-0 w-full h-full bg-[#0F111A] text-slate-100 font-sans flex flex-col items-center justify-center overflow-hidden selection:bg-purple-500 selection:text-white select-none">
       
-      {/* Background Decor */}
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed top-6 z-50 bg-purple-600 text-white px-5 py-2.5 rounded-full border border-purple-400 shadow-2xl text-xs font-bold animate-bounce">
+          {toastMessage}
+        </div>
+      )}
+
+      {/* Background Glow */}
       <div className="absolute inset-0 pointer-events-none overflow-hidden z-0">
         <div className="absolute top-[-20%] left-[-10%] w-[60vw] h-[60vw] rounded-full bg-purple-900/10 blur-[120px]" />
         <div className="absolute bottom-[-20%] right-[-10%] w-[50vw] h-[50vw] rounded-full bg-blue-900/10 blur-[100px]" />
       </div>
 
-      <div className="relative z-10 w-full max-w-md px-4 flex flex-col items-center flex-1 py-6 h-full">
+      <div className="relative z-10 w-full max-w-md px-4 flex flex-col items-center justify-center flex-1 py-4 h-full">
         
-        {/* --- PHASE: INTRO --- */}
+        {/* --- PHASE 1: INTRO --- */}
         {phase === 'intro' && (
-          <div className="bg-slate-900/80 border border-slate-800 p-8 rounded-3xl shadow-2xl backdrop-blur-xl w-full text-center my-auto">
+          <div className="bg-slate-900/90 border border-slate-800 p-8 rounded-3xl shadow-2xl backdrop-blur-xl w-full text-center my-auto">
             <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 rounded-2xl mx-auto mb-6 flex items-center justify-center shadow-lg shadow-purple-500/30">
               <svg className="w-10 h-10 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -352,7 +341,7 @@ export default function App() {
             <p className="text-sm text-slate-300 mb-8 leading-relaxed">
               This clinical-grade Ishihara test generates thousands of colored dots dynamically to precisely identify your color vision deficiencies. 
               <br/><br/>
-              It generates a secure JSON profile to instantly calibrate games like <strong>Colorfle Unlimited</strong> to your exact eyesight.
+              It generates a JSON profile to calibrate games like <strong>Colorfle Unlimited</strong> to your exact eyesight.
             </p>
             
             <button 
@@ -364,94 +353,91 @@ export default function App() {
           </div>
         )}
 
-        {/* --- PHASE: TESTING --- */}
+        {/* --- PHASE 2: TESTING --- */}
         {phase === 'testing' && (
-          <div className="w-full h-full flex flex-col justify-between animate-fade-in">
+          <div className="w-full h-full flex flex-col justify-between py-2 animate-fade-in">
             
-            {/* Header / Progress */}
-            <div className="w-full flex items-center justify-between mb-4 flex-shrink-0">
-              <h2 className="text-lg font-black text-white">What number do you see?</h2>
-              <div className="text-sm font-bold text-slate-400">
+            {/* Header */}
+            <div className="w-full flex items-center justify-between mb-2 flex-shrink-0">
+              <h2 className="text-base sm:text-lg font-black text-white">What number do you see?</h2>
+              <div className="text-xs sm:text-sm font-bold text-slate-400">
                 Plate {currentIndex + 1} <span className="text-slate-600">/ {plates.length}</span>
               </div>
             </div>
 
-            {/* Ishihara Canvas Display */}
-            <div className="w-full flex justify-center flex-shrink-0 relative">
+            {/* Ishihara Canvas */}
+            <div className="w-full flex justify-center flex-shrink-0 relative my-auto">
               <div className="bg-slate-900 border-4 border-slate-800 p-2 rounded-full shadow-2xl relative">
                 
-                {/* Loading State while packing circles */}
                 {isGenerating && (
                   <div className="absolute inset-0 bg-slate-900 rounded-full flex flex-col items-center justify-center z-10">
                     <svg className="animate-spin w-10 h-10 text-purple-500" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
-                    <span className="text-xs text-slate-400 mt-2 font-bold uppercase tracking-widest">Generating Plate</span>
+                    <span className="text-[10px] text-slate-400 mt-2 font-bold uppercase tracking-widest">Generating Plate</span>
                   </div>
                 )}
 
-                {/* The actual Plate Canvas */}
                 <canvas 
                   ref={canvasRef} 
                   width={340} 
                   height={340}
-                  className="rounded-full w-[300px] h-[300px] sm:w-[340px] sm:h-[340px]"
+                  className="rounded-full w-[280px] h-[280px] sm:w-[320px] sm:h-[320px]"
                 />
               </div>
             </div>
 
-            {/* Input Display Area */}
-            <div className="w-full mt-4 mb-2 flex justify-center flex-shrink-0">
-              <div className={`w-32 h-14 bg-slate-900 border-2 rounded-xl flex items-center justify-center text-2xl font-black ${inputValue ? 'border-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]' : 'border-slate-800 text-slate-500'}`}>
+            {/* Input Display */}
+            <div className="w-full my-2 flex justify-center flex-shrink-0">
+              <div className={`w-28 h-12 bg-slate-900 border-2 rounded-xl flex items-center justify-center text-2xl font-black ${inputValue ? 'border-purple-500 text-white shadow-[0_0_15px_rgba(168,85,247,0.4)]' : 'border-slate-800 text-slate-500'}`}>
                 {inputValue || '?'}
               </div>
             </div>
 
-            {/* Numpad Input */}
-            <div className="w-full flex-1 flex flex-col justify-end pb-2">
-              <div className="grid grid-cols-3 gap-2 sm:gap-3 mb-2">
+            {/* Numpad */}
+            <div className="w-full flex flex-col justify-end pb-1">
+              <div className="grid grid-cols-3 gap-1.5 sm:gap-2 mb-1.5">
                 {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
                   <button
                     key={num}
                     onClick={() => handleInput(num)}
-                    className="h-14 sm:h-16 bg-slate-800/80 hover:bg-slate-700 rounded-xl text-xl font-bold transition active:scale-90"
+                    className="h-12 sm:h-14 bg-slate-800/80 hover:bg-slate-700 rounded-xl text-lg font-bold transition active:scale-90"
                   >
                     {num}
                   </button>
                 ))}
                 <button
                   onClick={handleClear}
-                  className="h-14 sm:h-16 bg-slate-800/80 hover:bg-slate-700 text-rose-400 rounded-xl text-sm font-bold transition active:scale-90"
+                  className="h-12 sm:h-14 bg-slate-800/80 hover:bg-slate-700 text-rose-400 rounded-xl text-xs font-bold transition active:scale-90"
                 >
                   CLEAR
                 </button>
                 <button
                   onClick={() => handleInput(0)}
-                  className="h-14 sm:h-16 bg-slate-800/80 hover:bg-slate-700 rounded-xl text-xl font-bold transition active:scale-90"
+                  className="h-12 sm:h-14 bg-slate-800/80 hover:bg-slate-700 rounded-xl text-lg font-bold transition active:scale-90"
                 >
                   0
                 </button>
                 <button
                   onClick={() => submitAnswer(inputValue || -1)}
                   disabled={!inputValue}
-                  className="h-14 sm:h-16 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-800 disabled:text-slate-600 disabled:opacity-50 text-white rounded-xl text-sm font-black transition active:scale-90"
+                  className="h-12 sm:h-14 bg-purple-600 hover:bg-purple-500 disabled:bg-slate-800 disabled:text-slate-600 disabled:opacity-50 text-white rounded-xl text-xs font-black transition active:scale-90"
                 >
                   ENTER
                 </button>
               </div>
 
-              {/* Nothing Button */}
               <button
                 onClick={() => submitAnswer(-1)}
-                className="w-full h-14 border border-slate-700 text-slate-400 hover:bg-slate-800 hover:text-white rounded-xl text-sm font-bold transition active:scale-95"
+                className="w-full h-11 border border-slate-700 text-slate-400 hover:bg-slate-800 hover:text-white rounded-xl text-xs font-bold transition active:scale-95"
               >
                 I Don't See A Number
               </button>
             </div>
 
-            {/* Progress Bar Bottom */}
-            <div className="w-full h-1.5 bg-slate-800 rounded-full mt-2 overflow-hidden flex-shrink-0">
+            {/* Progress Bar */}
+            <div className="w-full h-1.5 bg-slate-800 rounded-full mt-1 overflow-hidden flex-shrink-0">
               <div 
                 className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300"
                 style={{ width: `${(currentIndex / plates.length) * 100}%` }}
@@ -461,25 +447,25 @@ export default function App() {
           </div>
         )}
 
-        {/* --- PHASE: RESULT --- */}
+        {/* --- PHASE 3: RESULT --- */}
         {phase === 'result' && resultData && (
-          <div className="bg-slate-900/80 border border-slate-800 p-6 rounded-3xl shadow-2xl backdrop-blur-xl w-full text-center animate-fade-in my-auto">
+          <div className="bg-slate-900/90 border border-slate-800 p-6 rounded-3xl shadow-2xl backdrop-blur-xl w-full text-center animate-fade-in my-auto">
             
-            <div className="w-16 h-16 bg-slate-800 rounded-full mx-auto mb-4 flex items-center justify-center border-4 border-slate-700">
-              <svg className="w-8 h-8 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div className="w-14 h-14 bg-slate-800 rounded-full mx-auto mb-3 flex items-center justify-center border-4 border-slate-700">
+              <svg className="w-7 h-7 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7" />
               </svg>
             </div>
             
-            <h2 className="text-2xl font-black text-white mb-1">Diagnostic Complete</h2>
-            <p className="text-xs text-slate-400 mb-6">Your clinical vision profile has been generated.</p>
+            <h2 className="text-xl font-black text-white mb-1">Diagnostic Complete</h2>
+            <p className="text-[11px] text-slate-400 mb-5">Your vision profile has been generated.</p>
 
-            <div className="bg-slate-800/60 border border-slate-700 p-4 rounded-2xl mb-6 text-left">
-              <h3 className="text-lg font-black text-purple-400 mb-1">{resultData.diagnosis}</h3>
-              <p className="text-xs text-slate-300 mb-4">{resultData.desc}</p>
+            <div className="bg-slate-800/70 border border-slate-700 p-3.5 rounded-2xl mb-4 text-left">
+              <h3 className="text-base font-black text-purple-400 mb-1">{resultData.diagnosis}</h3>
+              <p className="text-xs text-slate-300 mb-3 leading-relaxed">{resultData.desc}</p>
               
-              <div className="space-y-2 font-mono text-sm">
-                <div className="flex justify-between items-center border-b border-slate-700 pb-2">
+              <div className="space-y-1.5 font-mono text-xs">
+                <div className="flex justify-between items-center border-b border-slate-700 pb-1.5">
                   <span className="text-slate-400">Diagnosis ID</span>
                   <span className="text-white font-bold bg-slate-900 px-2 py-0.5 rounded">{resultData.type}</span>
                 </div>
@@ -490,8 +476,8 @@ export default function App() {
               </div>
             </div>
 
-            <div className="bg-black/50 p-3 rounded-xl border border-slate-800 mb-6">
-              <div className="text-[10px] uppercase text-slate-500 font-bold mb-2 flex justify-between">
+            <div className="bg-black/50 p-2.5 rounded-xl border border-slate-800 mb-4">
+              <div className="text-[9px] uppercase text-slate-500 font-bold mb-1 flex justify-between">
                 <span>Colorfle Export JSON</span>
               </div>
               <pre className="text-left text-xs text-emerald-400 font-mono overflow-x-auto whitespace-pre-wrap">
@@ -499,25 +485,25 @@ export default function App() {
               </pre>
             </div>
 
-            <div className="space-y-3">
+            <div className="space-y-2">
               <button 
                 onClick={copyProfile}
-                className="w-full py-3.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-black text-sm shadow-lg transition flex items-center justify-center gap-2 active:scale-95"
+                className="w-full py-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-black text-xs shadow-lg transition flex items-center justify-center gap-2 active:scale-95"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
                 </svg>
-                Copy Profile & Play Colorfle
+                Copy Profile JSON
               </button>
               
               <button 
                 onClick={downloadProfile}
-                className="w-full py-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-sm shadow-lg transition flex items-center justify-center gap-2 active:scale-95 border border-slate-700"
+                className="w-full py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs shadow-lg transition flex items-center justify-center gap-2 active:scale-95 border border-slate-700"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
                 </svg>
-                Download Profile .json
+                Download Profile (.json)
               </button>
             </div>
           </div>
@@ -527,10 +513,10 @@ export default function App() {
 
       <style>{`
         .animate-fade-in { 
-          animation: fadeIn 0.4s ease-out; 
+          animation: fadeIn 0.35s ease-out; 
         }
         @keyframes fadeIn { 
-          from { opacity: 0; transform: translateY(10px); } 
+          from { opacity: 0; transform: translateY(8px); } 
           to { opacity: 1; transform: translateY(0); } 
         }
       `}</style>
