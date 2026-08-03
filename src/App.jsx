@@ -248,7 +248,7 @@ export default function App() {
 
     const jsonProfile = JSON.stringify({
       type: primaryType,
-      severity: severity,
+      strength: severity,
       deutanScore: `${5 - deutanErrors}/5`,
       protanScore: `${5 - protanErrors}/5`,
       tritanScore: `${5 - tritanErrors}/5`,
