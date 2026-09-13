@@ -1,269 +1,328 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { createStaircase } from './adaptive.js';
+import { makeTrialPlate, makeControlPlate, renderPlate, DIRECTIONS } from './plategen.js';
+import {
+  MAX_D,
+  severityFromThreshold,
+  classify,
+  getInterpolatedMatrix
+} from './colorscience.js';
 
-// --- ISHIHARA DIAGNOSTIC TEST PLATES ---
-// 1 Control plate + 5 Deutan + 5 Protan + 5 Tritan plates
-const TEST_PLATES = [
-  { id: 1, type: 'control', number: '12', description: 'Control Plate (Visible to all vision types)' },
-  { id: 2, type: 'deutan', number: '8', difficulty: 1, description: 'Mild Deutan Assessment' },
-  { id: 3, type: 'deutan', number: '29', difficulty: 2, description: 'Moderate Deutan Assessment' },
-  { id: 4, type: 'deutan', number: '5', difficulty: 3, description: 'Moderate-Strong Deutan Assessment' },
-  { id: 5, type: 'deutan', number: '74', difficulty: 4, description: 'Strong Deutan Assessment' },
-  { id: 6, type: 'deutan', number: '3', difficulty: 5, description: 'Severe Deutan Assessment' },
-  { id: 7, type: 'protan', number: '6', difficulty: 1, description: 'Mild Protan Assessment' },
-  { id: 8, type: 'protan', number: '45', difficulty: 2, description: 'Moderate Protan Assessment' },
-  { id: 9, type: 'protan', number: '2', difficulty: 3, description: 'Moderate-Strong Protan Assessment' },
-  { id: 10, type: 'protan', number: '97', difficulty: 4, description: 'Strong Protan Assessment' },
-  { id: 11, type: 'protan', number: '15', difficulty: 5, description: 'Severe Protan Assessment' },
-  { id: 12, type: 'tritan', number: '7', difficulty: 1, description: 'Mild Tritan Assessment' },
-  { id: 13, type: 'tritan', number: '16', difficulty: 2, description: 'Moderate Tritan Assessment' },
-  { id: 14, type: 'tritan', number: '4', difficulty: 3, description: 'Moderate-Strong Tritan Assessment' },
-  { id: 15, type: 'tritan', number: '35', difficulty: 4, description: 'Strong Tritan Assessment' },
-  { id: 16, type: 'tritan', number: '9', difficulty: 5, description: 'Severe Tritan Assessment' }
-];
+const COLORFLE_URL = 'https://colorfle-unlimited.vercel.app';
+const HISTORY_KEY = 'chromasight_history_v2';
+const LAST_KEY = 'chromasight_last_v2';
 
-const getPlatePalettes = (type, difficulty = 1) => {
-  if (type === 'control') {
-    return {
-      foreground: ['#EF4444', '#DC2626', '#B91C1C', '#F87171'], // Vibrant high-contrast reds
-      background: ['#10B981', '#059669', '#047857', '#34D399']  // Deep rich greens
-    };
+const AXES = ['protan', 'deutan', 'tritan'];
+const AXIS_LABELS = { protan: 'Protan (L cone / red)', deutan: 'Deutan (M cone / green)', tritan: 'Tritan (S cone / blue)' };
+const AXIS_COLORS = { protan: 'bg-rose-500', deutan: 'bg-emerald-500', tritan: 'bg-sky-500' };
+
+const readJson = (key, fallback) => {
+  try {
+    const s = localStorage.getItem(key);
+    return s ? JSON.parse(s) : fallback;
+  } catch (e) {
+    return fallback;
   }
-
-  if (type === 'deutan') {
-    // Red-Green confusion along Deutan confusion line
-    const fgShades = difficulty > 3 
-      ? ['#6EE7B7', '#34D399', '#10B981', '#A7F3D0']
-      : ['#34D399', '#10B981', '#059669', '#A7F3D0'];
-    const bgShades = ['#F97316', '#FB923C', '#EA580C', '#D97706', '#B45309', '#CA8A04'];
-    return { foreground: fgShades, background: bgShades };
-  }
-
-  if (type === 'protan') {
-    // Red-Olive confusion along Protan confusion line
-    const fgShades = difficulty > 3
-      ? ['#EF4444', '#F87171', '#DC2626', '#FCA5A5']
-      : ['#DC2626', '#B91C1C', '#EF4444', '#F87171'];
-    const bgShades = ['#65A30D', '#84CC16', '#4D7C0F', '#A16207', '#854D0E', '#713F12'];
-    return { foreground: fgShades, background: bgShades };
-  }
-
-  if (type === 'tritan') {
-    // Blue-Yellow confusion along Tritan confusion line
-    const fgShades = difficulty > 3
-      ? ['#38BDF8', '#60A5FA', '#0284C7', '#93C5FD']
-      : ['#0284C7', '#1D4ED8', '#2563EB', '#3B82F6'];
-    const bgShades = ['#EAB308', '#FACC15', '#CA8A04', '#E11D48', '#BE123C', '#9F1239'];
-    return { foreground: fgShades, background: bgShades };
-  }
-
-  return { foreground: ['#22C55E'], background: ['#F97316'] };
 };
 
-export default function App() {
-  const [phase, setPhase] = useState('welcome'); // 'welcome' | 'testing' | 'results'
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [userAnswers, setUserAnswers] = useState({});
-  const [inputValue, setInputValue] = useState('');
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [toastMessage, setToastMessage] = useState('');
-  const [isCopied, setIsCopied] = useState(false);
+const encodeProfileB64 = (profile) =>
+  btoa(JSON.stringify(profile)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-  const canvasRef = useRef(null);
+const TYPE_INFO = {
+  normal: { title: 'Normal Color Perception', blurb: 'Your thresholds along all three cone-confusion axes are within the normal trichromat range. No color assistance needed.' },
+  protanopia: { title: 'Protan-type Deficiency', blurb: 'Elevated threshold along the L-cone (red) confusion axis. Reds appear darker and red/green hues can collapse.' },
+  deuteranopia: { title: 'Deutan-type Deficiency', blurb: 'Elevated threshold along the M-cone (green) confusion axis — the most common form of color blindness. Red/green hues can collapse.' },
+  tritanopia: { title: 'Tritan-type Deficiency', blurb: 'Elevated threshold along the S-cone (blue) confusion axis. Blue/yellow hues can collapse. (Rare — worth confirming clinically.)' },
+  achromatopsia: { title: 'Strong Deficiency on All Axes', blurb: 'All three axes show strongly elevated thresholds. This pattern can indicate achromatopsia (monochromacy) or a very dim/miscalibrated screen — verify with controls on another display.' }
+};
 
-  const showToast = (msg) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(''), 2800);
+// ---------- Colorfle preview board ----------
+const PREVIEW_PALETTE = ['#EF4444', '#FB923C', '#FACC15', '#84CC16', '#16A34A', '#06B6D4', '#2563EB', '#9333EA', '#F472B6', '#6B7280'];
+const PREVIEW_SLICES = ['#EF4444', '#FACC15', '#16A34A'];
+const PREVIEW_TARGET = '#9333EA';
+
+const ColorflePreview = ({ type, strength, view, setView }) => {
+  const filtered = view === 'standard' ? null : { type, strength };
+  const assisted = view === 'assisted';
+
+  const tileBorder = (status) => {
+    if (!assisted) {
+      if (status === 'correct') return 'border-emerald-500 border-4';
+      if (status === 'present') return 'border-amber-400 border-4';
+      return 'border-slate-700';
+    }
+    if (status === 'correct') return 'border-blue-500 border-4';
+    if (status === 'present') return 'border-orange-500 border-4';
+    return 'border-slate-700';
   };
 
-  const renderPlate = useCallback(() => {
-    if (phase !== 'testing' || !TEST_PLATES[currentIndex]) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  const symbol = (status) =>
+    assisted ? (status === 'correct' ? '✓' : status === 'present' ? '⟳' : '✕') : null;
 
-    setIsGenerating(true);
+  return (
+    <div className="space-y-2">
+      <div className="flex justify-center gap-1.5">
+        {[
+          ['standard', 'Standard vision'],
+          ['yours', 'Your vision'],
+          ['assisted', 'With Colorfle assist']
+        ].map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setView(id)}
+            className={'px-2.5 py-1 rounded-lg text-[10px] font-bold border transition ' + (
+              view === id ? 'bg-purple-600 border-purple-400 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
-    setTimeout(() => {
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      const width = canvas.width;
-      const height = canvas.height;
-      const plate = TEST_PLATES[currentIndex];
+      <div className="mx-auto max-w-xs rounded-2xl border border-slate-800 bg-[#12131C] p-3 shadow-inner">
+        <svg width="0" height="0" style={{ position: 'absolute' }} aria-hidden="true">
+          <defs>
+            <filter id="preview-sim">
+              <feColorMatrix type="matrix" values={filtered ? getInterpolatedMatrix(filtered.type, filtered.strength) : getInterpolatedMatrix('deuteranopia', 0)} />
+            </filter>
+          </defs>
+        </svg>
 
-      // Step 1: Draw hidden text mask on offscreen canvas
-      const maskCanvas = document.createElement('canvas');
-      maskCanvas.width = width;
-      maskCanvas.height = height;
-      const mCtx = maskCanvas.getContext('2d');
-      mCtx.fillStyle = 'black';
-      mCtx.fillRect(0, 0, width, height);
-      mCtx.fillStyle = 'white';
+        <div style={filtered ? { filter: 'url(#preview-sim)' } : undefined} className="flex flex-col items-center gap-2.5">
+          {/* the pie wheel: target right half, player slices left */}
+          <div className="w-28 h-28 rounded-full border-4 border-slate-700 overflow-hidden">
+            <svg viewBox="0 0 200 200" className="w-full h-full">
+              <path d="M 100 100 L 100 10 A 90 90 0 0 1 100 190 Z" fill={PREVIEW_TARGET} />
+              <path d="M 100 100 L 100 10 A 90 90 0 0 0 10 100 Z" fill={PREVIEW_SLICES[0]} />
+              <path d="M 100 100 L 10 100 A 90 90 0 0 0 73 171.8 Z" fill={PREVIEW_SLICES[1]} />
+              <path d="M 100 100 L 73 171.8 A 90 90 0 0 0 100 190 Z" fill={PREVIEW_SLICES[2]} />
+            </svg>
+          </div>
 
-      // Precise font size to ensure zero clipping
-      const text = plate.number.toString();
-      const fontSize = text.length > 1 ? 165 : 215;
-      mCtx.font = `900 ${fontSize}px Inter, System-UI, sans-serif`;
-      mCtx.textAlign = 'center';
-      mCtx.textBaseline = 'middle';
-      mCtx.fillText(text, width / 2, height / 2 + 6);
+          {/* a sample guess row with Wordle-style feedback */}
+          <div className="flex items-center gap-1.5">
+            {[
+              ['#EF4444', 'correct'],
+              ['#16A34A', 'present'],
+              ['#FACC15', 'absent']
+            ].map(([hex, status], i) => (
+              <div
+                key={i}
+                className={'w-8 h-8 rounded-lg flex items-center justify-center relative ' + tileBorder(status)}
+                style={{ backgroundColor: hex }}
+              >
+                {symbol(status) && (
+                  <span className={'text-[11px] font-black drop-shadow ' + (status === 'correct' ? 'text-blue-300' : status === 'present' ? 'text-orange-300' : 'text-slate-300')}>
+                    {symbol(status)}
+                  </span>
+                )}
+              </div>
+            ))}
+            <div className="ml-1 w-8 h-8 rounded-full border-2 border-slate-700 flex items-center justify-center text-[9px] font-black text-white" style={{ backgroundColor: '#7A6BAA' }}>
+              82%
+            </div>
+          </div>
 
-      const imgData = mCtx.getImageData(0, 0, width, height).data;
+          {/* palette keyboard */}
+          <div className="flex flex-wrap justify-center gap-1 max-w-[240px]">
+            {PREVIEW_PALETTE.map((hex, i) => (
+              <div
+                key={i}
+                className={'w-6 h-6 rounded-md border shadow-sm flex items-center justify-center ' + (assisted ? 'border-blue-500 border-2' : 'border-slate-600')}
+                style={{ backgroundColor: hex }}
+              >
+                {assisted && <span className="text-[6px] font-black text-white drop-shadow">{hex.slice(1, 4).toUpperCase()}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
 
-      // Step 2: Draw circular base plate
-      ctx.clearRect(0, 0, width, height);
-      ctx.beginPath();
-      ctx.arc(width / 2, height / 2, width / 2 - 2, 0, Math.PI * 2);
-      ctx.fillStyle = '#1E293B';
-      ctx.fill();
+        <div className="text-center text-[9px] text-slate-400 mt-2 leading-relaxed">
+          {view === 'standard' && 'How the game looks with standard trichromatic vision.'}
+          {view === 'yours' && `How the game looks for you: ${type} simulation at ${Math.round(strength * 100)}% — the measured severity from your test.`}
+          {view === 'assisted' && 'Colorfle\'s assistive mode (high-contrast blue/orange borders, symbols, swatch labels) restores playability.'}
+        </div>
+      </div>
+    </div>
+  );
+};
 
-      // Step 3: High-Density Circle Packing Algorithm (~3800 circles)
-      const circles = [];
-      const maxAttempts = 150000;
-      const maxCircles = 3800;
+// ---------- main app ----------
+export default function App() {
+  const [phase, setPhase] = useState('welcome'); // welcome | testing | results
+  const [trial, setTrial] = useState(null);
+  const [answeredCount, setAnsweredCount] = useState(0);
+  const [isLocked, setIsLocked] = useState(false);
+  const [toastMessage, setToastMessage] = useState('');
+  const [isCopied, setIsCopied] = useState(false);
+  const [previewView, setPreviewView] = useState('yours');
 
-      for (let i = 0; i < maxAttempts; i++) {
-        let r = Math.random() > 0.88 ? 7.5 : Math.random() > 0.4 ? 4.2 : 2.4;
-        let x = Math.random() * width;
-        let y = Math.random() * height;
+  const canvasRef = useRef(null);
+  const staircaseRef = useRef(null);
+  const sessionRef = useRef({});
+  const toastTimer = useRef(null);
 
-        let distToCenter = Math.sqrt(Math.pow(x - width / 2, 2) + Math.pow(y - height / 2, 2));
-        if (distToCenter + r > width / 2 - 4) continue;
-
-        let overlap = false;
-        for (let j = 0; j < circles.length; j++) {
-          let c = circles[j];
-          let dx = x - c.x;
-          let dy = y - c.y;
-          if (dx * dx + dy * dy < Math.pow(r + c.r + 0.8, 2)) {
-            overlap = true;
-            break;
-          }
-        }
-
-        if (!overlap) {
-          circles.push({ x, y, r });
-          if (circles.length >= maxCircles) break;
-        }
-      }
-
-      const palettes = getPlatePalettes(plate.type, plate.difficulty);
-
-      circles.forEach(c => {
-        const pixelIdx = (Math.floor(c.y) * width + Math.floor(c.x)) * 4;
-        const isTextPixel = imgData[pixelIdx] > 128;
-
-        const colorList = isTextPixel ? palettes.foreground : palettes.background;
-        const baseColor = colorList[Math.floor(Math.random() * colorList.length)];
-
-        ctx.beginPath();
-        ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
-        ctx.fillStyle = baseColor;
-        ctx.fill();
-      });
-
-      setIsGenerating(false);
-    }, 20);
-  }, [phase, currentIndex]);
-
-  useEffect(() => {
-    renderPlate();
-  }, [renderPlate]);
-
-  const handleNextPlate = useCallback((answerVal) => {
-    const finalAnswer = answerVal !== undefined ? answerVal : inputValue.trim() || 'none';
-    
-    setUserAnswers(prev => ({
-      ...prev,
-      [TEST_PLATES[currentIndex].id]: finalAnswer
-    }));
-
-    setInputValue('');
-
-    if (currentIndex < TEST_PLATES.length - 1) {
-      setCurrentIndex(prev => prev + 1);
-    } else {
-      setPhase('results');
+  const fromColorfle = useMemo(() => {
+    try {
+      return new URLSearchParams(window.location.search).get('from') === 'colorfle';
+    } catch (e) {
+      return false;
     }
-  }, [currentIndex, inputValue]);
+  }, []);
 
-  useEffect(() => {
-    if (phase !== 'testing') return;
+  const [history, setHistory] = useState(() => readJson(HISTORY_KEY, []));
+  const [lastResult, setLastResult] = useState(() => readJson(LAST_KEY, null));
 
-    const handleKeyDown = (e) => {
-      // Ignore if modifier keys are down
-      if (e.ctrlKey || e.altKey || e.metaKey) return;
+  const resultsRef = useRef(null);
+  const [results, setResults] = useState(null);
 
-      if (e.key >= '0' && e.key <= '9') {
-        setInputValue(prev => (prev.length < 2 ? prev + e.key : prev));
-      } else if (e.key === 'Backspace') {
-        setInputValue(prev => prev.slice(0, -1));
-      } else if (e.key === 'Delete' || e.key === 'c' || e.key === 'C') {
-        setInputValue('');
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        handleNextPlate();
-      } else if (e.key === 'n' || e.key === 'N' || e.key === ' ') {
-        e.preventDefault();
-        handleNextPlate('none');
-      }
+  const showToast = useCallback((msg) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToastMessage(msg);
+    toastTimer.current = setTimeout(() => setToastMessage(''), 2800);
+  }, []);
+
+  // --- session lifecycle ---
+  const beginSession = () => {
+    staircaseRef.current = createStaircase({ ceilings: MAX_D });
+    sessionRef.current = {
+      nonce: Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
+      trialNum: 0,
+      controlResults: [],
+      controlCheckpoints: [1, 15], // trial numbers (post-answer counts) where a control is injected
+      finalControlDone: false
     };
+    setAnsweredCount(0);
+    setResults(null);
+    setPhase('testing');
+    advanceTrial();
+  };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [phase, handleNextPlate]);
+  const buildTrial = (kind) => {
+    const s = sessionRef.current;
+    s.trialNum += 1;
+    const direction = DIRECTIONS[Math.floor(Math.random() * 4)];
+    const seed = s.nonce + '-' + s.trialNum;
 
-  const diagnosticResults = useMemo(() => {
-    if (phase !== 'results') return null;
-
-    let deutanErrors = 0;
-    let protanErrors = 0;
-    let tritanErrors = 0;
-
-    TEST_PLATES.forEach(plate => {
-      const ans = userAnswers[plate.id];
-      const isCorrect = ans === plate.number.toString();
-
-      if (!isCorrect && plate.type !== 'control') {
-        if (plate.type === 'deutan') deutanErrors++;
-        if (plate.type === 'protan') protanErrors++;
-        if (plate.type === 'tritan') tritanErrors++;
-      }
-    });
-
-    let primaryType = 'normal';
-    let maxErrors = 0;
-
-    if (deutanErrors >= 2 && deutanErrors >= maxErrors) {
-      primaryType = 'deuteranopia';
-      maxErrors = deutanErrors;
+    if (kind === 'control') {
+      return { kind, plate: makeControlPlate({ direction, seed }), direction, seed };
     }
-    if (protanErrors >= 2 && protanErrors > maxErrors) {
-      primaryType = 'protanopia';
-      maxErrors = protanErrors;
-    }
-    if (tritanErrors >= 2 && tritanErrors > maxErrors) {
-      primaryType = 'tritanopia';
-      maxErrors = tritanErrors;
-    }
-
-    const severity = Math.min(1.0, Math.round((maxErrors / 5) * 100) / 100);
-
-    const jsonProfile = JSON.stringify({
-      type: primaryType,
-      strength: severity,
-      deutanScore: `${5 - deutanErrors}/5`,
-      protanScore: `${5 - protanErrors}/5`,
-      tritanScore: `${5 - tritanErrors}/5`,
-      timestamp: new Date().toISOString().split('T')[0]
-    }, null, 2);
-
+    const t = staircaseRef.current.nextTrial();
+    if (!t) return null;
+    const d = Math.min(t.d, MAX_D[t.axis]);
     return {
-      type: primaryType,
-      severity,
-      deutanErrors,
-      protanErrors,
-      tritanErrors,
-      jsonProfile
+      kind: t.warmup ? 'warmup' : 'adaptive',
+      axis: t.axis,
+      d,
+      direction,
+      seed,
+      plate: makeTrialPlate({ axis: t.axis, d, direction, seed })
     };
-  }, [phase, userAnswers]);
+  };
+
+  const advanceTrial = () => {
+    const s = sessionRef.current;
+
+    // inject control plates at checkpoints and at the very end
+    const needControl = s.controlCheckpoints.includes(s.trialNum + 1);
+    const next = buildTrial(needControl ? 'control' : 'test');
+
+    if (next) {
+      setTrial(next);
+      setAnsweredCount(s.trialNum);
+      return;
+    }
+
+    if (!s.finalControlDone) {
+      s.finalControlDone = true;
+      const control = buildTrial('control');
+      setTrial(control);
+      setAnsweredCount(s.trialNum);
+      return;
+    }
+
+    finishSession();
+  };
+
+  const handleAnswer = (dir) => {
+    if (!trial || isLocked || phase !== 'testing') return;
+    const st = staircaseRef.current;
+    const correct = dir === trial.direction;
+
+    if (trial.kind === 'control') {
+      sessionRef.current.controlResults.push(correct);
+    } else if (trial.kind === 'adaptive' && st) {
+      st.record(trial.axis, correct);
+    }
+
+    setIsLocked(true);
+    setTimeout(() => {
+      setIsLocked(false);
+      advanceTrial();
+    }, 220);
+  };
+
+  const finishSession = () => {
+    const st = staircaseRef.current;
+    const s = sessionRef.current;
+
+    const severities = {};
+    AXES.forEach((axis) => {
+      severities[axis] = severityFromThreshold(st.threshold(axis), MAX_D[axis]);
+    });
+    const cls = classify(severities);
+    const controlsPassed = s.controlResults.filter(Boolean).length;
+
+    const result = {
+      type: cls.type,
+      severity: cls.type === 'normal' ? 0 : cls.severity,
+      severities,
+      borderline: cls.borderline,
+      controlsPassed,
+      controlsTotal: s.controlResults.length,
+      lowReliability: s.controlResults.length >= 2 && controlsPassed < s.controlResults.length - 1,
+      trials: s.trialNum,
+      testedAt: new Date().toISOString().slice(0, 10)
+    };
+    resultsRef.current = result;
+    setResults(result);
+    setTrial(null);
+    setPhase('results');
+
+    try {
+      localStorage.setItem(LAST_KEY, JSON.stringify(result));
+      const h = [result, ...history].slice(0, 6);
+      setHistory(h);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
+    } catch (e) {}
+  };
+
+  // --- results → profile ---
+  const profileJson = useMemo(() => {
+    if (!results) return '';
+    // 'normal' exports a zero-strength simulation (identity) so Colorfle
+    // accepts the profile cleanly without enabling any filter effect
+    const simType = results.type === 'normal' ? 'deuteranopia' : results.type;
+    return JSON.stringify({
+      v: 2,
+      app: 'chromasight',
+      type: simType,
+      strength: Math.round(results.severity * 100) / 100,
+      axes: {
+        protanopia: Math.round(results.severities.protan * 100) / 100,
+        deuteranopia: Math.round(results.severities.deutan * 100) / 100,
+        tritanopia: Math.round(results.severities.tritan * 100) / 100
+      },
+      reliability: results.lowReliability ? 'low' : 'ok',
+      testedAt: results.testedAt
+    }, null, 2);
+  }, [results]);
+
+  const sendToColorfle = () => {
+    if (!results) return;
+    const profile = JSON.parse(profileJson);
+    window.location.href = COLORFLE_URL + '#cb-profile=' + encodeProfileB64(profile);
+  };
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -271,16 +330,47 @@ export default function App() {
       showToast('Profile copied to clipboard!');
       setTimeout(() => setIsCopied(false), 2500);
     }).catch(() => {
-      showToast('Select text manually to copy.');
+      showToast('Copy failed — select the text manually.');
     });
   };
 
+  // --- plate rendering ---
+  useEffect(() => {
+    if (phase !== 'testing' || !trial || !canvasRef.current) return;
+    renderPlate(canvasRef.current, trial.plate, trial.seed);
+  }, [phase, trial]);
+
+  // --- keyboard controls ---
+  useEffect(() => {
+    if (phase !== 'testing') return;
+    const onKey = (e) => {
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      const map = {
+        ArrowUp: 'up',
+        ArrowDown: 'down',
+        ArrowLeft: 'left',
+        ArrowRight: 'right'
+      };
+      if (map[e.key]) {
+        e.preventDefault();
+        handleAnswer(map[e.key]);
+      } else if (e.key === 'Escape') {
+        setPhase('welcome');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
+  const totalTrialsEstimate = 2 * 3 + 8 * 3 + 3; // warmups + adaptive + controls
+  const progressPct = Math.min(100, Math.round((answeredCount / totalTrialsEstimate) * 100));
+
   return (
     <div className="min-h-screen bg-[#090C15] text-slate-100 font-sans flex flex-col items-center justify-between p-4 selection:bg-purple-500 selection:text-white relative">
-      
-      {/* Toast Notification */}
+
+      {/* Toast */}
       {toastMessage && (
-        <div className="fixed top-6 z-50 bg-slate-800/90 backdrop-blur-md text-white px-5 py-2.5 rounded-full border border-purple-500/60 shadow-2xl text-xs font-bold animate-bounce flex items-center gap-2">
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-50 bg-slate-800/90 backdrop-blur-md text-white px-5 py-2.5 rounded-full border border-purple-500/60 shadow-2xl text-xs font-bold animate-fade-in flex items-center gap-2" role="status">
           <svg className="w-4 h-4 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
@@ -301,21 +391,23 @@ export default function App() {
             <h1 className="text-base font-black tracking-wider bg-clip-text text-transparent bg-gradient-to-r from-purple-300 via-indigo-200 to-slate-100">
               ChromaSight
             </h1>
-            <span className="text-[10px] text-slate-400 font-bold block -mt-1 tracking-wider uppercase">Diagnostic Profiler</span>
+            <span className="text-[10px] text-slate-400 font-bold block -mt-1 tracking-wider uppercase">Adaptive Vision Profiler</span>
           </div>
         </div>
 
-        {phase === 'testing' && (
+        {phase === 'testing' && trial && (
           <div className="text-xs font-bold bg-slate-900 px-3 py-1.5 rounded-full border border-slate-800 text-slate-300 flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-purple-500 animate-pulse" />
-            <span>Plate {currentIndex + 1} / {TEST_PLATES.length}</span>
+            <span className={'w-2 h-2 rounded-full animate-pulse ' + (trial.kind === 'control' ? 'bg-amber-400' : 'bg-purple-500')} />
+            <span>
+              {trial.kind === 'control' ? 'Check plate' : 'Trial'} {answeredCount + 1}
+            </span>
           </div>
         )}
       </header>
 
-      {/* --- WELCOME SCREEN --- */}
+      {/* --- WELCOME --- */}
       {phase === 'welcome' && (
-        <div className="w-full max-w-md my-auto flex flex-col items-center text-center gap-6 p-6 rounded-3xl bg-slate-900/60 border border-slate-800/80 shadow-2xl backdrop-blur-xl">
+        <div className="w-full max-w-md my-auto flex flex-col items-center text-center gap-5 p-6 rounded-3xl bg-slate-900/60 border border-slate-800/80 shadow-2xl backdrop-blur-xl">
           <div className="w-20 h-20 rounded-3xl bg-gradient-to-tr from-purple-950 to-indigo-950 border border-purple-500/30 flex items-center justify-center text-purple-300 shadow-inner">
             <svg className="w-10 h-10" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
@@ -323,31 +415,68 @@ export default function App() {
           </div>
 
           <div className="space-y-2">
-            <h2 className="text-2xl font-black text-white tracking-wide">Precision Ishihara Assessment</h2>
+            <h2 className="text-2xl font-black text-white tracking-wide">Adaptive Color Vision Test</h2>
             <p className="text-xs text-slate-300 leading-relaxed max-w-xs mx-auto">
-              Measures perception along <strong>Deutan</strong>, <strong>Protan</strong>, and <strong>Tritan</strong> color confusion axes using pseudo-isochromatic dot plates.
+              Measures your thresholds along the <strong>Protan</strong>, <strong>Deutan</strong>, and <strong>Tritan</strong> cone-confusion axes using an adaptive staircase — the same principle as laboratory color vision tests — with a continuous severity estimate instead of coarse pass/fail plates.
             </p>
           </div>
 
-          <div className="w-full bg-slate-950/70 p-4 rounded-2xl border border-slate-800 text-left text-xs text-slate-300 space-y-2">
+          {fromColorfle && (
+            <div className="w-full p-2.5 rounded-xl bg-purple-950/60 border border-purple-500/40 text-[11px] text-purple-200 text-left flex items-center gap-2">
+              <svg className="w-4 h-4 shrink-0 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+              </svg>
+              Opened from Colorfle — finish the test, then tap <strong>Send to Colorfle</strong> to apply your profile instantly.
+            </div>
+          )}
+
+          <div className="w-full bg-slate-950/70 p-4 rounded-2xl border border-slate-800 text-left text-xs text-slate-300 space-y-1.5">
             <div className="font-bold text-purple-400 uppercase tracking-wider text-[10px] flex items-center gap-1.5">
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
-              <span>Test Guidelines</span>
+              <span>Before You Start</span>
             </div>
-            <p>1. Increase screen brightness to max for best fidelity.</p>
-            <p>2. Enter the numbers you see using your <strong>keyboard</strong> or the keypad.</p>
-            <p>3. Press <strong>Space</strong> or tap <strong>"Nothing"</strong> if no number is visible.</p>
-            <p>4. Export your JSON profile directly into <strong>Colorfle Unlimited</strong>.</p>
+            <p>1. Screen brightness at <strong>max</strong>, no night-shift / blue-light filters.</p>
+            <p>2. View from about <strong>50–70 cm</strong>, ambient light on, no glare.</p>
+            <p>3. A chevron <strong>▲</strong> hides in each plate — answer the direction it points.</p>
+            <p>4. If unsure, <strong>take your best guess</strong> — guessing is part of the measurement.</p>
+            <p>5. Uses arrow keys or the on-screen compass. Takes about <strong>3 minutes</strong>.</p>
           </div>
 
+          {lastResult && (
+            <div className="w-full p-3 rounded-2xl bg-slate-950/60 border border-slate-800 text-left">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1">Last result</div>
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <div className="text-sm font-black text-white">{(TYPE_INFO[lastResult.type] || TYPE_INFO.normal).title}</div>
+                  <div className="text-[10px] text-slate-400">
+                    {lastResult.type === 'normal' ? 'No assistance needed' : `Severity ${Math.round(lastResult.severity * 100)}%`} • {lastResult.testedAt}
+                  </div>
+                </div>
+                {lastResult.type !== 'normal' && (
+                  <button
+                    onClick={() => {
+                      const profile = {
+                        v: 2,
+                        app: 'chromasight',
+                        type: lastResult.type,
+                        strength: Math.round(lastResult.severity * 100) / 100,
+                        testedAt: lastResult.testedAt
+                      };
+                      window.location.href = COLORFLE_URL + '#cb-profile=' + encodeProfileB64(profile);
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-bold transition shrink-0"
+                  >
+                    Send to Colorfle
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           <button
-            onClick={() => {
-              setPhase('testing');
-              setCurrentIndex(0);
-              setUserAnswers({});
-            }}
+            onClick={beginSession}
             className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-fuchsia-600 hover:from-purple-500 hover:to-fuchsia-500 text-white font-black text-xs uppercase tracking-widest shadow-xl shadow-purple-950/40 transition transform hover:scale-[1.02] active:scale-95 flex items-center justify-center gap-2"
           >
             <span>Begin Assessment</span>
@@ -358,138 +487,142 @@ export default function App() {
         </div>
       )}
 
-      {/* --- TESTING SCREEN --- */}
-      {phase === 'testing' && (
+      {/* --- TESTING --- */}
+      {phase === 'testing' && trial && (
         <div className="w-full max-w-md my-auto flex flex-col items-center gap-4">
-          
-          {/* Canvas Plate Container */}
+
+          <div className="w-full max-w-xs">
+            <div className="flex justify-between text-[10px] text-slate-400 font-bold mb-1">
+              <span>{trial.kind === 'control' ? 'Attention check — this one should be easy' : 'Adaptive measurement in progress'}</span>
+              <span>{progressPct}%</span>
+            </div>
+            <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+              <div className="h-full bg-gradient-to-r from-purple-500 to-fuchsia-500 transition-all duration-300" style={{ width: progressPct + '%' }} />
+            </div>
+          </div>
+
           <div className="relative flex flex-col items-center">
-            <div className="w-72 h-72 sm:w-80 sm:h-80 rounded-full border-4 border-slate-800 shadow-2xl relative overflow-hidden bg-slate-950 flex items-center justify-center">
+            <div className="w-72 h-72 sm:w-80 sm:h-80 rounded-full border-4 border-slate-800 shadow-2xl relative overflow-hidden bg-slate-950">
               <canvas
                 ref={canvasRef}
                 width={360}
                 height={360}
-                className={`w-full h-full rounded-full transition-opacity duration-200 ${isGenerating ? 'opacity-30' : 'opacity-100'}`}
+                className={'w-full h-full rounded-full transition-opacity duration-150 ' + (isLocked ? 'opacity-60' : 'opacity-100')}
               />
-              {isGenerating && (
-                <div className="absolute inset-0 flex items-center justify-center text-xs font-bold text-purple-300 bg-black/50 backdrop-blur-xs">
-                  Generating Plate...
-                </div>
-              )}
             </div>
-            
-            <div className="text-[11px] text-slate-400 font-semibold mt-2.5 flex items-center gap-1.5">
-              <span>Type or select the number visible in the dots</span>
+            <div className="text-[11px] text-slate-400 font-semibold mt-2.5 text-center">
+              Which way does the hidden chevron point?
+              <span className="block text-[9px] text-slate-500 mt-0.5">Unsure? Best guess — it&apos;s part of the measurement.</span>
             </div>
           </div>
 
-          {/* Number Display Field */}
-          <div className="w-52 h-11 bg-slate-950 border-2 border-purple-500/60 rounded-xl flex items-center justify-center text-2xl font-black tracking-widest text-purple-200 shadow-inner">
-            {inputValue || <span className="text-slate-600 text-xs font-normal uppercase tracking-wider">Type number</span>}
+          {/* Compass answer pad */}
+          <div className="grid grid-cols-3 grid-rows-3 gap-1.5 w-44 h-44">
+            <div />
+            <button onClick={() => handleAnswer('up')} disabled={isLocked} aria-label="Up" className="rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 disabled:opacity-50 flex items-center justify-center transition active:scale-95">
+              <svg className="w-5 h-5 text-purple-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 15l7-7 7 7" /></svg>
+            </button>
+            <div />
+            <button onClick={() => handleAnswer('left')} disabled={isLocked} aria-label="Left" className="rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 disabled:opacity-50 flex items-center justify-center transition active:scale-95">
+              <svg className="w-5 h-5 text-purple-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 19l-7-7 7-7" /></svg>
+            </button>
+            <div className="rounded-xl bg-slate-950/60 border border-slate-800/60 flex items-center justify-center">
+              <span className="text-[8px] text-slate-500 font-bold uppercase tracking-wider text-center leading-tight">Arrow keys<br />work too</span>
+            </div>
+            <button onClick={() => handleAnswer('right')} disabled={isLocked} aria-label="Right" className="rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 disabled:opacity-50 flex items-center justify-center transition active:scale-95">
+              <svg className="w-5 h-5 text-purple-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 5l7 7-7 7" /></svg>
+            </button>
+            <div />
+            <button onClick={() => handleAnswer('down')} disabled={isLocked} aria-label="Down" className="rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 disabled:opacity-50 flex items-center justify-center transition active:scale-95">
+              <svg className="w-5 h-5 text-purple-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" /></svg>
+            </button>
+            <div />
           </div>
 
-          {/* On-Screen Keypad */}
-          <div className="w-full max-w-xs grid grid-cols-3 gap-2">
-            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(num => (
-              <button
-                key={num}
-                onClick={() => setInputValue(prev => (prev.length < 2 ? prev + num.toString() : prev))}
-                className="py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-black text-base shadow-md border border-slate-800 active:scale-95 transition"
-              >
-                {num}
-              </button>
-            ))}
-
-            <button
-              onClick={() => setInputValue('')}
-              className="py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-rose-300 font-bold text-xs shadow-md border border-slate-800 active:scale-95 transition flex items-center justify-center gap-1"
-            >
-              <span>Clear</span>
-            </button>
-
-            <button
-              onClick={() => setInputValue(prev => (prev.length < 2 ? prev + '0' : prev))}
-              className="py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-black text-base shadow-md border border-slate-800 active:scale-95 transition"
-            >
-              0
-            </button>
-
-            <button
-              onClick={() => handleNextPlate('none')}
-              className="py-3 rounded-xl bg-slate-900 hover:bg-slate-800 text-amber-300 font-bold text-xs shadow-md border border-slate-800 active:scale-95 transition flex items-center justify-center gap-1"
-            >
-              <span>Nothing</span>
-            </button>
-          </div>
-
-          {/* Submit Action Button */}
-          <div className="w-full max-w-xs flex gap-2 mt-1">
-            <button
-              onClick={() => handleNextPlate()}
-              disabled={!inputValue}
-              className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-40 text-slate-950 font-black text-xs uppercase tracking-wider shadow-lg transition active:scale-95 flex items-center justify-center gap-1.5"
-            >
-              <span>Confirm Answer</span>
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
-              </svg>
-            </button>
-          </div>
+          <button
+            onClick={() => {
+              if (window.confirm('Abort the test and return to the start? Results will be discarded.')) setPhase('welcome');
+            }}
+            className="text-[10px] text-slate-500 hover:text-rose-400 font-bold transition"
+          >
+            Abort test
+          </button>
         </div>
       )}
 
-      {/* --- RESULTS SCREEN --- */}
-      {phase === 'results' && diagnosticResults && (
-        <div className="w-full max-w-md my-auto flex flex-col gap-4 p-5 rounded-3xl bg-slate-900/80 border border-slate-800 shadow-2xl backdrop-blur-md">
+      {/* --- RESULTS --- */}
+      {phase === 'results' && results && (
+        <div className="w-full max-w-md my-auto flex flex-col gap-4 p-5 rounded-3xl bg-slate-900/80 border border-slate-800 shadow-2xl backdrop-blur-md max-h-none">
+
           <div className="text-center space-y-1">
-            <h2 className="text-xl font-black text-purple-300">Diagnostic Assessment</h2>
-            <p className="text-xs text-slate-400">Ishihara Color Discrimination Profile</p>
+            <h2 className="text-xl font-black text-purple-300">Assessment Complete</h2>
+            <p className="text-xs text-slate-400">Adaptive cone-confusion threshold profile • {results.trials} trials</p>
           </div>
 
-          {/* Diagnosis Badge */}
-          <div className="p-4 rounded-2xl bg-slate-950/80 border border-purple-500/40 text-center space-y-1 shadow-inner">
+          {/* Diagnosis */}
+          <div className="p-4 rounded-2xl bg-slate-950/80 border border-purple-500/40 text-center space-y-1.5 shadow-inner">
             <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Detected Diagnosis</div>
-            <div className="text-lg font-black text-white capitalize">
-              {diagnosticResults.type === 'normal' ? 'Normal Color Perception' : diagnosticResults.type}
-            </div>
-            {diagnosticResults.type !== 'normal' && (
+            <div className="text-lg font-black text-white">{(TYPE_INFO[results.type] || TYPE_INFO.normal).title}</div>
+            {results.type !== 'normal' && results.type !== 'achromatopsia' && (
               <div className="text-xs font-bold text-purple-400">
-                Severity Rating: {Math.round(diagnosticResults.severity * 100)}%
+                Severity: {Math.round(results.severity * 100)}% {results.borderline && <span className="text-amber-400">(borderline — confirm with a retest)</span>}
               </div>
             )}
+            <p className="text-[11px] text-slate-400 leading-relaxed max-w-xs mx-auto pt-1">{(TYPE_INFO[results.type] || TYPE_INFO.normal).blurb}</p>
+            {results.lowReliability && (
+              <div className="text-[10px] text-amber-400 font-bold pt-1">
+                ⚠ Attention checks missed ({results.controlsPassed}/{results.controlsTotal}) — screen or attention issue; consider retaking.
+              </div>
+            )}
+            <div className="text-[9px] text-slate-500 pt-1">Screening estimate — not a clinical diagnosis.</div>
           </div>
 
-          {/* Error Breakdown Grid */}
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
-              <div className="text-xs font-bold text-slate-400">Deutan</div>
-              <div className="text-sm font-black text-emerald-400 mt-0.5">{5 - diagnosticResults.deutanErrors} / 5</div>
-            </div>
-            <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
-              <div className="text-xs font-bold text-slate-400">Protan</div>
-              <div className="text-sm font-black text-amber-400 mt-0.5">{5 - diagnosticResults.protanErrors} / 5</div>
-            </div>
-            <div className="bg-slate-950/60 p-2.5 rounded-xl border border-slate-800">
-              <div className="text-xs font-bold text-slate-400">Tritan</div>
-              <div className="text-sm font-black text-cyan-400 mt-0.5">{5 - diagnosticResults.tritanErrors} / 5</div>
-            </div>
+          {/* Per-axis meters */}
+          <div className="space-y-2">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Axis Threshold Severities</div>
+            {AXES.map((axis) => (
+              <div key={axis} className="flex items-center gap-2">
+                <span className="w-32 text-[10px] text-slate-400 font-bold shrink-0">{AXIS_LABELS[axis]}</span>
+                <div className="flex-1 h-3 rounded-full bg-slate-800 overflow-hidden">
+                  <div
+                    className={'h-full rounded-full transition-all duration-700 ' + AXIS_COLORS[axis]}
+                    style={{ width: Math.max(2, results.severities[axis] * 100) + '%' }}
+                  />
+                </div>
+                <span className="w-9 text-right text-[10px] font-black text-white">{Math.round(results.severities[axis] * 100)}%</span>
+              </div>
+            ))}
+            <div className="text-[9px] text-slate-500">0% = normal trichromat threshold • 100% = effectively dichromatic on that axis</div>
           </div>
 
-          {/* JSON Export Container */}
-          <div className="space-y-1.5">
+          {/* Colorfle preview */}
+          <div className="space-y-2 p-3 rounded-2xl bg-slate-950/50 border border-slate-800">
             <div className="flex items-center justify-between">
-              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Colorfle JSON Profile</label>
-              {isCopied && <span className="text-[10px] font-bold text-emerald-400">Copied!</span>}
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">What Colorfle looks like for you</div>
             </div>
-            <textarea
-              readOnly
-              value={diagnosticResults.jsonProfile}
-              rows={5}
-              className="w-full bg-slate-950 text-purple-300 font-mono text-[11px] p-3 rounded-xl border border-slate-800 resize-none shadow-inner focus:outline-none"
+            <ColorflePreview
+              type={results.type === 'normal' ? 'deuteranopia' : (results.type === 'achromatopsia' ? 'achromatopsia' : results.type)}
+              strength={results.severity}
+              view={previewView}
+              setView={setPreviewView}
             />
+          </div>
+
+          {/* Export */}
+          <div className="space-y-2">
             <button
-              onClick={() => copyToClipboard(diagnosticResults.jsonProfile)}
-              className="w-full py-3 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-md transition flex items-center justify-center gap-2"
+              onClick={sendToColorfle}
+              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs uppercase tracking-wider shadow-lg transition active:scale-95 flex items-center justify-center gap-2"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+              </svg>
+              Send to Colorfle — Apply My Profile
+            </button>
+
+            <button
+              onClick={() => copyToClipboard(profileJson)}
+              className="w-full py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs shadow-md transition flex items-center justify-center gap-2"
             >
               {isCopied ? (
                 <>
@@ -503,27 +636,62 @@ export default function App() {
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                   </svg>
-                  <span>Copy Diagnostic JSON Profile</span>
+                  <span>Copy Profile JSON (manual import)</span>
                 </>
               )}
             </button>
+
+            <details className="group">
+              <summary className="text-[10px] text-slate-500 hover:text-slate-300 cursor-pointer font-bold select-none">Show raw profile JSON</summary>
+              <textarea
+                readOnly
+                value={profileJson}
+                rows={7}
+                className="w-full mt-1.5 bg-slate-950 text-purple-300 font-mono text-[10px] p-3 rounded-xl border border-slate-800 resize-none shadow-inner focus:outline-none"
+              />
+            </details>
           </div>
 
-          <button
-            onClick={() => setPhase('welcome')}
-            className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition flex items-center justify-center gap-1.5"
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-            </svg>
-            <span>Retake Diagnostic Test</span>
-          </button>
+          {/* History */}
+          {history.length > 1 && (
+            <div className="space-y-1.5">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">History</div>
+              <div className="space-y-1 max-h-28 overflow-y-auto custom-scrollbar pr-1">
+                {history.map((h, i) => (
+                  <div key={i} className="flex items-center justify-between text-[10px] bg-slate-950/60 border border-slate-800 rounded-lg px-2.5 py-1.5">
+                    <span className="text-slate-300 font-bold">{(TYPE_INFO[h.type] || TYPE_INFO.normal).title}</span>
+                    <span className="text-slate-500">
+                      {h.type === 'normal' ? '—' : Math.round(h.severity * 100) + '%'} • {h.testedAt}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <button
+              onClick={beginSession}
+              className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition flex items-center justify-center gap-1.5"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              <span>Retake Test</span>
+            </button>
+            <button
+              onClick={() => setPhase('welcome')}
+              className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition"
+            >
+              Home
+            </button>
+          </div>
         </div>
       )}
 
       {/* FOOTER */}
       <footer className="text-[10px] text-slate-500 text-center py-2">
-        ChromaSight Profiler • High-Resolution Ishihara Diagnostics
+        ChromaSight Profiler • LMS cone-space adaptive psychophysics • Screening tool, not a medical device
       </footer>
 
     </div>

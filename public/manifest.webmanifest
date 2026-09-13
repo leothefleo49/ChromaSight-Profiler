@@ -1,0 +1,15 @@
+{
+  "name": "ChromaSight Profiler",
+  "short_name": "ChromaSight",
+  "description": "Adaptive, science-based color vision test with continuous severity and Colorfle integration.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#090C15",
+  "theme_color": "#090C15",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
