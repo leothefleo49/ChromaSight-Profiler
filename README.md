@@ -18,11 +18,16 @@ palette approximations:
 - A trichromat sees it clearly, with visibility scaling by separation.
 
 A **transformed staircase (2-down/1-up)** adapts the separation per axis until
-it converges on your ~70.7%-correct threshold, interleaving axes so you can't
-settle into a rhythm. Thresholds map to **continuous severities (0–100%)** per
-axis instead of coarse pass/fail plates. Attention-check control plates
-validate screen/attention, and all dots carry shared luminance jitter so
-brightness can never leak the shape.
+it converges on your threshold, interleaving axes so you can't settle into a
+rhythm. Difficulty never drops below a per-axis **visibility floor** (measured
+so every plate is clearly visible to normal trichromats — e.g., the tritan
+floor is far higher than red-green because small S-axis shifts are genuinely
+hard to render distinguishably on sRGB screens), and pair selection keeps only
+contrast-strong candidates. Thresholds map to **continuous severities
+(0–100%)** per axis instead of coarse pass/fail plates. Attention-check
+control plates validate screen/attention, **blank catch plates** (same colors,
+no chevron) give an honest "No arrow" answer and expose noise-guessing, and
+all dots carry shared luminance jitter so brightness can never leak the shape.
 
 ## Results
 

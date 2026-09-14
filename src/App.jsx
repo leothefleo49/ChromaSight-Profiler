@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createStaircase } from './adaptive.js';
-import { makeTrialPlate, makeControlPlate, renderPlate, DIRECTIONS } from './plategen.js';
+import { makeTrialPlate, makeControlPlate, makeNullPlate, renderPlate, DIRECTIONS } from './plategen.js';
 import {
   MAX_D,
+  D_FLOOR,
   severityFromThreshold,
   classify,
   getInterpolatedMatrix
@@ -13,6 +14,8 @@ const HISTORY_KEY = 'chromasight_history_v2';
 const LAST_KEY = 'chromasight_last_v2';
 
 const AXES = ['protan', 'deutan', 'tritan'];
+const MAX_BLANK_TRIALS = 3;
+const BLANK_CHANCE = 0.15;
 const AXIS_LABELS = { protan: 'Protan (L cone / red)', deutan: 'Deutan (M cone / green)', tritan: 'Tritan (S cone / blue)' };
 const AXIS_COLORS = { protan: 'bg-rose-500', deutan: 'bg-emerald-500', tritan: 'bg-sky-500' };
 
@@ -184,13 +187,17 @@ export default function App() {
 
   // --- session lifecycle ---
   const beginSession = () => {
-    staircaseRef.current = createStaircase({ ceilings: MAX_D });
+    staircaseRef.current = createStaircase({ floors: D_FLOOR, ceilings: MAX_D });
     sessionRef.current = {
       nonce: Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36),
       trialNum: 0,
       controlResults: [],
       controlCheckpoints: [1, 15], // trial numbers (post-answer counts) where a control is injected
-      finalControlDone: false
+      finalControlDone: false,
+      blanksUsed: 0,
+      blanksCaught: 0,
+      blankFalsePositives: 0,
+      lastWasBlank: false
     };
     setAnsweredCount(0);
     setResults(null);
@@ -210,6 +217,24 @@ export default function App() {
     const t = staircaseRef.current.nextTrial();
     if (!t) return null;
     const d = Math.min(t.d, MAX_D[t.axis]);
+
+    // Blank (catch) plates: same colors/difficulty as a real plate, no
+    // chevron. They don't consume staircase trials — a "No arrow" answer is
+    // correct on them, and reporting a direction on one is a false positive.
+    if (!t.warmup && s.blanksUsed < MAX_BLANK_TRIALS && !s.lastWasBlank && Math.random() < BLANK_CHANCE) {
+      s.blanksUsed += 1;
+      s.lastWasBlank = true;
+      return {
+        kind: 'blank',
+        axis: t.axis,
+        d,
+        direction: null,
+        seed,
+        plate: makeNullPlate({ axis: t.axis, d, seed })
+      };
+    }
+    s.lastWasBlank = false;
+
     return {
       kind: t.warmup ? 'warmup' : 'adaptive',
       axis: t.axis,
@@ -247,12 +272,17 @@ export default function App() {
   const handleAnswer = (dir) => {
     if (!trial || isLocked || phase !== 'testing') return;
     const st = staircaseRef.current;
-    const correct = dir === trial.direction;
+    const s = sessionRef.current;
 
-    if (trial.kind === 'control') {
-      sessionRef.current.controlResults.push(correct);
+    if (trial.kind === 'blank') {
+      if (dir === null) s.blanksCaught += 1;
+      else s.blankFalsePositives += 1;
+    } else if (trial.kind === 'control') {
+      s.controlResults.push(dir !== null && dir === trial.direction);
     } else if (trial.kind === 'adaptive' && st) {
-      st.record(trial.axis, correct);
+      // "No arrow" on a real plate means the chevron wasn't visible at this
+      // difficulty — an honest wrong answer that steers the staircase up.
+      st.record(trial.axis, dir !== null && dir === trial.direction);
     }
 
     setIsLocked(true);
@@ -268,10 +298,13 @@ export default function App() {
 
     const severities = {};
     AXES.forEach((axis) => {
-      severities[axis] = severityFromThreshold(st.threshold(axis), MAX_D[axis]);
+      severities[axis] = severityFromThreshold(st.threshold(axis), D_FLOOR[axis], MAX_D[axis]);
     });
     const cls = classify(severities);
     const controlsPassed = s.controlResults.filter(Boolean).length;
+    const controlsTotal = s.controlResults.length;
+    const controlsFailed = controlsTotal >= 2 && controlsPassed < controlsTotal - 1;
+    const blanksFailed = s.blanksUsed >= 2 && s.blankFalsePositives >= Math.ceil(s.blanksUsed / 2);
 
     const result = {
       type: cls.type,
@@ -279,8 +312,11 @@ export default function App() {
       severities,
       borderline: cls.borderline,
       controlsPassed,
-      controlsTotal: s.controlResults.length,
-      lowReliability: s.controlResults.length >= 2 && controlsPassed < s.controlResults.length - 1,
+      controlsTotal,
+      blanksUsed: s.blanksUsed,
+      blanksCaught: s.blanksCaught,
+      blankFalsePositives: s.blankFalsePositives,
+      lowReliability: controlsFailed || blanksFailed,
       trials: s.trialNum,
       testedAt: new Date().toISOString().slice(0, 10)
     };
@@ -354,6 +390,9 @@ export default function App() {
       if (map[e.key]) {
         e.preventDefault();
         handleAnswer(map[e.key]);
+      } else if (e.key === 'n' || e.key === 'N' || e.key === ' ') {
+        e.preventDefault();
+        handleAnswer(null);
       } else if (e.key === 'Escape') {
         setPhase('welcome');
       }
@@ -439,9 +478,9 @@ export default function App() {
             </div>
             <p>1. Screen brightness at <strong>max</strong>, no night-shift / blue-light filters.</p>
             <p>2. View from about <strong>50–70 cm</strong>, ambient light on, no glare.</p>
-            <p>3. A chevron <strong>▲</strong> hides in each plate — answer the direction it points.</p>
-            <p>4. If unsure, <strong>take your best guess</strong> — guessing is part of the measurement.</p>
-            <p>5. Uses arrow keys or the on-screen compass. Takes about <strong>3 minutes</strong>.</p>
+            <p>3. A chevron <strong>▲</strong> hides in most plates — answer the direction it points.</p>
+            <p>4. <strong>Some plates are intentionally blank.</strong> If you see no chevron, tap <strong>No arrow</strong> (or press <strong>N</strong>) — never guess a direction.</p>
+            <p>5. Arrow keys / compass to answer. Takes about <strong>3 minutes</strong>.</p>
           </div>
 
           {lastResult && (
@@ -512,7 +551,7 @@ export default function App() {
             </div>
             <div className="text-[11px] text-slate-400 font-semibold mt-2.5 text-center">
               Which way does the hidden chevron point?
-              <span className="block text-[9px] text-slate-500 mt-0.5">Unsure? Best guess — it&apos;s part of the measurement.</span>
+              <span className="block text-[9px] text-slate-500 mt-0.5">Some plates are intentionally blank — if there&apos;s no chevron, tap <strong className="text-slate-300">No arrow</strong>.</span>
             </div>
           </div>
 
@@ -526,9 +565,17 @@ export default function App() {
             <button onClick={() => handleAnswer('left')} disabled={isLocked} aria-label="Left" className="rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 disabled:opacity-50 flex items-center justify-center transition active:scale-95">
               <svg className="w-5 h-5 text-purple-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 19l-7-7 7-7" /></svg>
             </button>
-            <div className="rounded-xl bg-slate-950/60 border border-slate-800/60 flex items-center justify-center">
-              <span className="text-[8px] text-slate-500 font-bold uppercase tracking-wider text-center leading-tight">Arrow keys<br />work too</span>
-            </div>
+            <button
+              onClick={() => handleAnswer(null)}
+              disabled={isLocked}
+              aria-label="No arrow"
+              className="rounded-xl bg-amber-950/60 hover:bg-amber-900/60 border border-amber-700/60 disabled:opacity-50 flex flex-col items-center justify-center transition active:scale-95"
+            >
+              <svg className="w-4 h-4 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+              </svg>
+              <span className="text-[8px] font-black uppercase tracking-wider text-amber-300 mt-0.5">No arrow</span>
+            </button>
             <button onClick={() => handleAnswer('right')} disabled={isLocked} aria-label="Right" className="rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 disabled:opacity-50 flex items-center justify-center transition active:scale-95">
               <svg className="w-5 h-5 text-purple-300" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M9 5l7 7-7 7" /></svg>
             </button>
@@ -538,6 +585,8 @@ export default function App() {
             </button>
             <div />
           </div>
+
+          <div className="text-[9px] text-slate-500 text-center -mt-2">Arrow keys answer · N or Space = No arrow</div>
 
           <button
             onClick={() => {
@@ -569,9 +618,19 @@ export default function App() {
               </div>
             )}
             <p className="text-[11px] text-slate-400 leading-relaxed max-w-xs mx-auto pt-1">{(TYPE_INFO[results.type] || TYPE_INFO.normal).blurb}</p>
-            {results.lowReliability && (
+            {results.controlsTotal > 0 && results.controlsPassed < results.controlsTotal && (
               <div className="text-[10px] text-amber-400 font-bold pt-1">
                 ⚠ Attention checks missed ({results.controlsPassed}/{results.controlsTotal}) — screen or attention issue; consider retaking.
+              </div>
+            )}
+            {results.blankFalsePositives > 0 && (
+              <div className="text-[10px] text-amber-400 font-bold pt-1">
+                ⚠ Reported chevrons on {results.blankFalsePositives} of {results.blanksUsed} blank plate{results.blanksUsed === 1 ? '' : 's'} — answers on pure noise inflate the result; retake without guessing.
+              </div>
+            )}
+            {results.blanksUsed > 0 && results.blankFalsePositives === 0 && (
+              <div className="text-[10px] text-emerald-500/90 font-bold pt-1">
+                ✓ Blank checks passed ({results.blanksCaught}/{results.blanksUsed} correctly called blank)
               </div>
             )}
             <div className="text-[9px] text-slate-500 pt-1">Screening estimate — not a clinical diagnosis.</div>

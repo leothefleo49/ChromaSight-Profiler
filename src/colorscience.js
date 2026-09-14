@@ -188,7 +188,23 @@ export const MAX_D = {};
 
 export const makeConfusablePair = (axis, D, rng = Math.random) => {
   const clampedD = Math.min(D, MAX_D[axis]);
-  const options = candidatePairs(axis, clampedD);
+  let options = candidatePairs(axis, clampedD);
+
+  // Visibility guard: at a given separation some (anchor, center) combos
+  // produce much weaker normal-vision contrast than others. Keep only
+  // options at least half as strong as the best one, so a plate at a given
+  // difficulty is never mysteriously invisible to normal trichromats.
+  if (options.length > 1) {
+    let bestDE = 0;
+    const scored = options.map((o) => {
+      const dE = hexDeltaE(o.fg, o.bg);
+      if (dE > bestDE) bestDE = dE;
+      return { o, dE };
+    });
+    const strong = scored.filter((s) => s.dE >= bestDE * 0.5).map((s) => s.o);
+    if (strong.length > 0) options = strong;
+  }
+
   if (options.length === 0) {
     // extreme fallback: neutral gray pair (still axis-pure, possibly clamped)
     const idx = CONE_AXIS_INDEX[axis];
@@ -204,8 +220,9 @@ export const makeConfusablePair = (axis, D, rng = Math.random) => {
 
 // Per-dot luminance jitter shared by fg and bg dots: masks tiny brightness
 // differences (exactly why real Ishihara plates look noisy), so the only
-// reliable signal is the missing-cone axis difference.
-export const jitterHex = (hex, rng = Math.random, amount = 0.045) => {
+// reliable signal is the missing-cone axis difference. Kept small enough
+// that it never buries the figure at the per-axis visibility floors below.
+export const jitterHex = (hex, rng = Math.random, amount = 0.035) => {
   const { r, g, b } = hexToRgb(hex);
   const lin = [srgbToLinear(r / 255), srgbToLinear(g / 255), srgbToLinear(b / 255)];
   const f = 1 + (rng() * 2 - 1) * amount;
@@ -217,17 +234,20 @@ export const jitterHex = (hex, rng = Math.random, amount = 0.045) => {
 };
 
 // --- severity mapping (continuous, log-scaled, per axis) ---
-// D_FLOOR: the practical threshold of a sharp trichromat on noisy
-// pseudo-isochromatic plates at a consumer display — below this, plate noise
-// dominates, so it anchors severity 0. The ceiling is the axis MAX_D:
-// failing to see separations that large means effectively dichromatic
-// vision on that axis. (Screening anchors, not clinical values.)
-export const D_FLOOR = 0.05;
+// D_FLOOR anchors severity 0 at the practical visibility floor for normal
+// trichromats on consumer displays, per axis. The tritan (S) axis floor is
+// much higher than red-green: small S-axis shifts produce colors that are
+// genuinely hard to separate on an sRGB screen even for perfect color
+// vision, so measuring below ~0.16 there only measures display noise
+// (verified: median pair contrast at the floors is ΔE ≥ ~21 for every
+// axis, vs ~2 of dot jitter). The ceiling is the axis MAX_D: failing to
+// see separations that large means effectively dichromatic vision.
+export const D_FLOOR = { protan: 0.05, deutan: 0.05, tritan: 0.16 };
 
-export const severityFromThreshold = (D, axisCeiling = 0.7) => {
+export const severityFromThreshold = (D, axisFloor = 0.05, axisCeiling = 0.7) => {
   if (!Number.isFinite(D)) return 1;
-  const d = Math.max(D, D_FLOOR);
-  const sev = Math.log(d / D_FLOOR) / Math.log(axisCeiling / D_FLOOR);
+  const d = Math.max(D, axisFloor);
+  const sev = Math.log(d / axisFloor) / Math.log(axisCeiling / axisFloor);
   return Math.max(0, Math.min(1, sev));
 };
 

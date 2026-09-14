@@ -19,6 +19,7 @@ import {
   AXIS_TO_TYPE
 } from './colorscience.js';
 import { createStaircase } from './adaptive.js';
+import { makeNullPlate, makeTrialPlate, DIRECTIONS } from './plategen.js';
 
 // ---- color transforms ----
 test('sRGB white maps to the D65 white point in XYZ/LMS', () => {
@@ -77,10 +78,51 @@ test('confusable pairs keep the two OTHER cone coordinates equal', () => {
 test('MAX_D is derived from the gamut and severities map onto [0,1]', () => {
   ['protan', 'deutan', 'tritan'].forEach((axis) => {
     assert.ok(MAX_D[axis] >= 0.1 && MAX_D[axis] <= 0.9, `${axis} MAX_D sane: ${MAX_D[axis]}`);
-    assert.equal(severityFromThreshold(D_FLOOR, MAX_D[axis]), 0);
-    assert.equal(severityFromThreshold(MAX_D[axis], MAX_D[axis]), 1);
-    assert.equal(severityFromThreshold(10, MAX_D[axis]), 1);
+    assert.equal(severityFromThreshold(D_FLOOR[axis], D_FLOOR[axis], MAX_D[axis]), 0);
+    assert.equal(severityFromThreshold(MAX_D[axis], D_FLOOR[axis], MAX_D[axis]), 1);
+    assert.equal(severityFromThreshold(10, D_FLOOR[axis], MAX_D[axis]), 1);
   });
+});
+
+// ---- visibility guarantees (regression: "plates with no visible arrow") ----
+test('at every axis floor, plates are clearly visible to normal trichromats', () => {
+  ['protan', 'deutan', 'tritan'].forEach((axis) => {
+    let worst = Infinity;
+    for (let i = 0; i < 40; i++) {
+      const { fg, bg } = makeConfusablePair(axis, D_FLOOR[axis], Math.random);
+      worst = Math.min(worst, hexDeltaE(fg, bg));
+    }
+    // jitter noise is ~ΔE 2; the weakest plate at the floor must still be
+    // several times above it so normal vision always sees the chevron
+    assert.ok(worst >= 10, `${axis} floor contrast too weak: worst ΔE ${worst.toFixed(1)}`);
+  });
+});
+
+test('contrast guard keeps every drawn pair at least half the best available contrast', () => {
+  ['protan', 'deutan', 'tritan'].forEach((axis) => {
+    const D = (D_FLOOR[axis] + MAX_D[axis]) / 2;
+    let minSeen = Infinity;
+    for (let i = 0; i < 60; i++) {
+      const { fg, bg } = makeConfusablePair(axis, D, Math.random);
+      minSeen = Math.min(minSeen, hexDeltaE(fg, bg));
+    }
+    assert.ok(minSeen >= 8, `${axis} mid-range contrast guard failed: min ΔE ${minSeen.toFixed(1)}`);
+  });
+});
+
+// ---- blank catch plates ----
+test('null plates carry valid colors and no direction', () => {
+  for (let i = 0; i < 10; i++) {
+    const axis = ['protan', 'deutan', 'tritan'][i % 3];
+    const p = makeNullPlate({ axis, d: 0.2, seed: 's' + i });
+    assert.equal(p.isNull, true);
+    assert.equal(p.direction, null);
+    assert.match(p.bg, /^#[0-9A-Fa-f]{6}$/);
+    assert.match(p.fg, /^#[0-9A-Fa-f]{6}$/);
+  }
+  const real = makeTrialPlate({ axis: 'deutan', d: 0.2, direction: 'up', seed: 'x' });
+  assert.equal(real.isNull, false);
+  assert.ok(DIRECTIONS.includes(real.direction));
 });
 
 test('confusable pair separation grows normal-vision deltaE', () => {
@@ -96,10 +138,14 @@ test('jitter keeps colors near the base', () => {
 
 // ---- severity mapping ----
 test('severity is monotonic between floor and ceiling', () => {
-  const s1 = severityFromThreshold(0.1, 0.7);
-  const s2 = severityFromThreshold(0.3, 0.7);
-  assert.ok(s1 > 0 && s1 < 1 && s2 > s1 && s2 < 1);
-  assert.equal(severityFromThreshold(0.001, 0.7), 0);
+  const f = D_FLOOR.deutan, c = MAX_D.deutan;
+  const mid1 = Math.sqrt(f * c);            // geometric middle
+  const mid2 = Math.sqrt(mid1 * c);         // upper-middle
+  const s1 = severityFromThreshold(mid1, f, c);
+  const s2 = severityFromThreshold(mid2, f, c);
+  assert.ok(s1 > 0 && s1 < 1, `s1=${s1}`);
+  assert.ok(s2 > s1 && s2 < 1, `s2=${s2}`);
+  assert.equal(severityFromThreshold(0.001, f, c), 0);
 });
 
 // ---- classification ----
@@ -181,8 +227,22 @@ test('staircase interleaves axes and finishes', () => {
   });
 });
 
+test('staircase respects per-axis floors and never descends below them', () => {
+  const st = createStaircase({ floors: D_FLOOR, ceilings: MAX_D, warmupsPerAxis: 0, adaptivePerAxis: 50, maxReversals: 99 });
+  // answer everything correctly: d should ride each axis floor
+  for (let i = 0; i < 120; i++) {
+    const t = st.nextTrial();
+    if (!t) break;
+    st.record(t.axis, true);
+  }
+  ['protan', 'deutan', 'tritan'].forEach((axis) => {
+    assert.ok(st.state[axis].d >= D_FLOOR[axis] - 1e-9, `${axis} d=${st.state[axis].d} below floor ${D_FLOOR[axis]}`);
+    assert.equal(st.threshold(axis), D_FLOOR[axis]);
+  });
+});
+
 test('threshold reflects performance: all-wrong axis ends near its ceiling', () => {
-  const st = createStaircase({ warmupsPerAxis: 0, adaptivePerAxis: 8, maxReversals: 99, ceilings: MAX_D });
+  const st = createStaircase({ warmupsPerAxis: 0, adaptivePerAxis: 8, maxReversals: 99, floors: D_FLOOR, ceilings: MAX_D });
   for (let i = 0; i < 30; i++) {
     const t = st.nextTrial();
     if (!t) break;

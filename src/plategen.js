@@ -9,10 +9,14 @@ import { makeConfusablePair, jitterHex } from './colorscience.js';
 // Directions for the 4-alternative forced-choice task
 export const DIRECTIONS = ['up', 'right', 'down', 'left'];
 
+// Fraction of the plate area a real chevron covers — blank plates scatter
+// their fg dots at the same share so they look statistically identical.
+export const NULL_FIGURE_SHARE = 0.24;
+
 export const makeTrialPlate = ({ axis, d, direction, seed }) => {
   const rng = mulberry32(strHash(seed + '|' + axis + '|' + direction + '|' + d.toFixed(4)));
   const { bg, fg } = makeConfusablePair(axis, d, rng);
-  return { bg, fg, direction, axis, d };
+  return { bg, fg, direction, axis, d, isNull: false };
 };
 
 // Control plates use strongly separated colors (blue vs orange) so anyone
@@ -20,7 +24,17 @@ export const makeTrialPlate = ({ axis, d, direction, seed }) => {
 // color discrimination.
 export const makeControlPlate = ({ direction, seed }) => {
   const rng = mulberry32(strHash('control|' + seed + '|' + direction));
-  return { bg: '#F59E0B', fg: '#2563EB', direction, axis: 'control', d: 1 };
+  return { bg: '#F59E0B', fg: '#2563EB', direction, axis: 'control', d: 1, isNull: false };
+};
+
+// Blank (catch) plates: same two color families as a real plate at the same
+// difficulty, but with NO hidden shape — both families are scattered at the
+// same proportion a real chevron occupies. They give an honest "I see
+// nothing" answer and expose users who report chevrons in pure noise.
+export const makeNullPlate = ({ axis, d, seed }) => {
+  const rng = mulberry32(strHash('null|' + seed + '|' + axis + '|' + d.toFixed(4)));
+  const { bg, fg } = makeConfusablePair(axis, d, rng);
+  return { bg, fg, direction: null, axis, d, isNull: true };
 };
 
 const radius = (dir) => {
@@ -99,8 +113,15 @@ export const renderPlate = (canvas, plate, seed) => {
   }
 
   circles.forEach((c) => {
-    const pixelIdx = (Math.floor(c.y) * width + Math.floor(c.x)) * 4;
-    const isFigure = mask[pixelIdx] > 128;
+    let isFigure;
+    if (plate.isNull) {
+      // blank plate: fg/bg scattered randomly at the chevron's area share,
+      // so color statistics look identical to a real plate with no shape
+      isFigure = rng() < NULL_FIGURE_SHARE;
+    } else {
+      const pixelIdx = (Math.floor(c.y) * width + Math.floor(c.x)) * 4;
+      isFigure = mask[pixelIdx] > 128;
+    }
     const base = isFigure ? plate.fg : plate.bg;
     ctx.beginPath();
     ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);

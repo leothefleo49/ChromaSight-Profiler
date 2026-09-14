@@ -11,19 +11,19 @@
 export const createStaircase = ({
   axes = ['protan', 'deutan', 'tritan'],
   startD,
-  floor = 0.05,
+  floors,
   ceilings,
   warmupsPerAxis = 2,
   adaptivePerAxis = 8,
   maxReversals = 5
 } = {}) => {
   const ceilOf = (a) => (ceilings && ceilings[a]) || 0.7;
+  const floorOf = (a) => (floors && floors[a]) || 0.05;
   const state = {};
   axes.forEach((axis) => {
-    const ceiling = ceilOf(axis);
     state[axis] = {
       // start at the geometric middle of the axis range unless given
-      d: startD ?? Math.sqrt(floor * ceiling),
+      d: startD ?? Math.sqrt(floorOf(axis) * ceilOf(axis)),
       consecutiveCorrect: 0,
       reversals: [], // { d, direction }
       lastStep: null,
@@ -78,7 +78,7 @@ export const createStaircase = ({
         s.consecutiveCorrect = 0;
         if (s.lastStep !== 'down') s.reversals.push({ d: s.d, direction: 'down' });
         s.lastStep = 'down';
-        s.d = Math.max(floor, s.d * 0.7);
+        s.d = Math.max(floorOf(axis), s.d * 0.7);
       }
     }
 
