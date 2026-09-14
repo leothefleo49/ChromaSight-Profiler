@@ -28,8 +28,19 @@ const readJson = (key, fallback) => {
   }
 };
 
+// local calendar date (not UTC) so "testedAt" never shows tomorrow
+const localDateStr = (d = new Date()) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
 const encodeProfileB64 = (profile) =>
   btoa(JSON.stringify(profile)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+const COLORFLE_ORIGIN = 'https://colorfle-unlimited.vercel.app';
+const isLocalOrigin = (origin) => /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
 
 const TYPE_INFO = {
   normal: { title: 'Normal Color Perception', blurb: 'Your thresholds along all three cone-confusion axes are within the normal trichromat range. No color assistance needed.' },
@@ -92,13 +103,14 @@ const ColorflePreview = ({ type, strength, view, setView }) => {
         </svg>
 
         <div style={filtered ? { filter: 'url(#preview-sim)' } : undefined} className="flex flex-col items-center gap-2.5">
-          {/* the pie wheel: target right half, player slices left */}
+          {/* the pie wheel: target right half, player slices left (50/35/15 —
+              boundary points computed on the r=90 circle, φ=153° from top) */}
           <div className="w-28 h-28 rounded-full border-4 border-slate-700 overflow-hidden">
             <svg viewBox="0 0 200 200" className="w-full h-full">
               <path d="M 100 100 L 100 10 A 90 90 0 0 1 100 190 Z" fill={PREVIEW_TARGET} />
               <path d="M 100 100 L 100 10 A 90 90 0 0 0 10 100 Z" fill={PREVIEW_SLICES[0]} />
-              <path d="M 100 100 L 10 100 A 90 90 0 0 0 73 171.8 Z" fill={PREVIEW_SLICES[1]} />
-              <path d="M 100 100 L 73 171.8 A 90 90 0 0 0 100 190 Z" fill={PREVIEW_SLICES[2]} />
+              <path d="M 100 100 L 10 100 A 90 90 0 0 0 59.1 180.2 Z" fill={PREVIEW_SLICES[1]} />
+              <path d="M 100 100 L 59.1 180.2 A 90 90 0 0 0 100 190 Z" fill={PREVIEW_SLICES[2]} />
             </svg>
           </div>
 
@@ -159,6 +171,7 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState('');
   const [isCopied, setIsCopied] = useState(false);
   const [previewView, setPreviewView] = useState('yours');
+  const [sentToApp, setSentToApp] = useState(false);
 
   const canvasRef = useRef(null);
   const staircaseRef = useRef(null);
@@ -312,7 +325,7 @@ export default function App() {
       blankFalsePositives: s.blankFalsePositives,
       lowReliability: controlsFailed || blanksFailed,
       trials: s.trialNum,
-      testedAt: new Date().toISOString().slice(0, 10)
+      testedAt: localDateStr()
     };
     resultsRef.current = result;
     setResults(result);
@@ -351,7 +364,40 @@ export default function App() {
   const sendToColorfle = () => {
     if (!results) return;
     const profile = JSON.parse(profileJson);
-    window.location.href = COLORFLE_URL + '#cb-profile=' + encodeProfileB64(profile);
+    sendProfileToColorfle(profile);
+  };
+
+  // Smart handoff:
+  //  - opened as a browser tab from a live Colorfle page → postMessage the
+  //    profile so the original page applies it instantly, confirm here
+  //  - opened inside the installed Colorfle PWA window (or a direct visit)
+  //    → navigate this window back to the game with the profile, so the
+  //    round trip returns to exactly where the user started
+  const sendProfileToColorfle = (profile) => {
+    const b64 = encodeProfileB64(profile);
+    const opener = window.opener && window.opener !== window ? window.opener : null;
+
+    if (opener) {
+      let referrerOrigin = null;
+      try {
+        referrerOrigin = document.referrer ? new URL(document.referrer).origin : null;
+      } catch (e) {}
+      // '*' guarantees delivery to the opener; the payload is just a color
+      // profile and we are the initiator, so it's safe as a fallback
+      const target = referrerOrigin && (referrerOrigin === COLORFLE_ORIGIN || isLocalOrigin(referrerOrigin))
+        ? referrerOrigin
+        : '*';
+      try {
+        opener.postMessage({ type: 'chromasight-profile', profile }, target);
+        setSentToApp(true);
+        showToast('Profile sent to Colorfle!');
+        return;
+      } catch (e) {
+        // fall through to navigation
+      }
+    }
+
+    window.location.href = COLORFLE_URL + '#cb-profile=' + b64;
   };
 
   const copyToClipboard = (text) => {
@@ -462,7 +508,16 @@ export default function App() {
               <svg className="w-4 h-4 shrink-0 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
               </svg>
-              Opened from Colorfle — finish the test, then tap <strong>Send to Colorfle</strong> to apply your profile instantly.
+              <span>
+                Opened from Colorfle — finish the test, then tap <strong>Send to Colorfle</strong>. You&apos;ll come
+                straight back to the game with your profile applied.{' '}
+                <button
+                  onClick={() => { window.location.href = COLORFLE_URL; }}
+                  className="underline font-bold hover:text-white"
+                >
+                  Go back now
+                </button>
+              </span>
             </div>
           )}
 
@@ -500,7 +555,7 @@ export default function App() {
                         strength: Math.round(lastResult.severity * 100) / 100,
                         testedAt: lastResult.testedAt
                       };
-                      window.location.href = COLORFLE_URL + '#cb-profile=' + encodeProfileB64(profile);
+                      sendProfileToColorfle(profile);
                     }}
                     className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-[10px] font-bold transition shrink-0"
                   >
@@ -603,6 +658,14 @@ export default function App() {
           <div className="text-center space-y-1">
             <h2 className="text-xl font-black text-purple-300">Assessment Complete</h2>
             <p className="text-xs text-slate-400">Adaptive cone-confusion threshold profile • {results.trials} trials</p>
+            {fromColorfle && (
+              <button
+                onClick={() => { window.location.href = COLORFLE_URL; }}
+                className="text-[11px] text-purple-400 hover:text-purple-200 font-bold underline"
+              >
+                ← Back to Colorfle
+              </button>
+            )}
           </div>
 
           {/* Diagnosis */}
@@ -666,15 +729,33 @@ export default function App() {
 
           {/* Export */}
           <div className="space-y-2">
-            <button
-              onClick={sendToColorfle}
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs uppercase tracking-wider shadow-lg transition active:scale-95 flex items-center justify-center gap-2"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3" />
-              </svg>
-              Send to Colorfle — Apply My Profile
-            </button>
+            {sentToApp ? (
+              <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-center space-y-1.5">
+                <div className="text-sm font-black text-emerald-400 flex items-center justify-center gap-1.5">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7" />
+                  </svg>
+                  Profile sent to Colorfle
+                </div>
+                <p className="text-[10px] text-emerald-200/80">It&apos;s applied instantly in the game — you can close this tab.</p>
+                <button
+                  onClick={() => { window.location.href = COLORFLE_URL + '#cb-profile=' + encodeProfileB64(JSON.parse(profileJson)); }}
+                  className="text-[10px] text-slate-400 hover:text-white underline font-bold"
+                >
+                  Open Colorfle here anyway
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={sendToColorfle}
+                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-black text-xs uppercase tracking-wider shadow-lg transition active:scale-95 flex items-center justify-center gap-2"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                </svg>
+                Send to Colorfle — Apply My Profile
+              </button>
+            )}
 
             <button
               onClick={() => copyToClipboard(profileJson)}
