@@ -87,11 +87,18 @@ export const renderPlate = (canvas, plate, seed) => {
   ctx.fillStyle = '#0F172A';
   ctx.fill();
 
-  // High-density circle packing (rejection sampling, mixed dot sizes)
+  // High-density circle packing (rejection sampling, mixed dot sizes).
+  // A spatial grid buckets placed circles so each candidate only checks its
+  // neighborhood — the naive O(n²) scan blocked the main thread long enough
+  // to swallow rapid answers.
   const circles = [];
   const maxAttempts = 160000;
+  const maxCircles = 4200;
+  const cellSize = 18; // > 2 * (max radius + padding)
+  const grid = new Map();
+  const cellKey = (cx, cy) => cx * 4096 + cy;
 
-  for (let i = 0; i < maxAttempts; i++) {
+  for (let i = 0; i < maxAttempts && circles.length < maxCircles; i++) {
     const t = rng();
     const r = t > 0.88 ? 7.5 : t > 0.4 ? 4.2 : 2.4;
     const x = rng() * width;
@@ -99,17 +106,31 @@ export const renderPlate = (canvas, plate, seed) => {
     const distToCenter = Math.sqrt((x - width / 2) ** 2 + (y - height / 2) ** 2);
     if (distToCenter + r > width / 2 - 4) continue;
 
+    const cx = Math.floor(x / cellSize);
+    const cy = Math.floor(y / cellSize);
     let overlap = false;
-    for (let j = 0; j < circles.length; j++) {
-      const c = circles[j];
-      const dx = x - c.x;
-      const dy = y - c.y;
-      if (dx * dx + dy * dy < (r + c.r + 0.8) ** 2) {
-        overlap = true;
-        break;
+    outer: for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        const bucket = grid.get(cellKey(gx, gy));
+        if (!bucket) continue;
+        for (let j = 0; j < bucket.length; j++) {
+          const c = bucket[j];
+          const dx = x - c.x;
+          const dy = y - c.y;
+          if (dx * dx + dy * dy < (r + c.r + 0.8) ** 2) {
+            overlap = true;
+            break outer;
+          }
+        }
       }
     }
-    if (!overlap) circles.push({ x, y, r });
+    if (overlap) continue;
+
+    const c = { x, y, r };
+    circles.push(c);
+    const k = cellKey(cx, cy);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(c);
   }
 
   circles.forEach((c) => {

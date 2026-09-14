@@ -43,7 +43,9 @@ export const createStaircase = ({
     if (warmupAxis) {
       state[warmupAxis].warmupTrials += 1;
       lastAxis = warmupAxis;
-      return { axis: warmupAxis, d: startD, warmup: true };
+      // NOTE: read the axis's current d (startD is optional and may be
+      // undefined); warmups always show a clearly visible separation
+      return { axis: warmupAxis, d: state[warmupAxis].d, warmup: true };
     }
 
     const remaining = axes.filter((a) => !axisDone(a));

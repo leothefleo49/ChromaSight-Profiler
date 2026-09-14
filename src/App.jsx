@@ -193,7 +193,6 @@ export default function App() {
       trialNum: 0,
       controlResults: [],
       controlCheckpoints: [1, 15], // trial numbers (post-answer counts) where a control is injected
-      finalControlDone: false,
       blanksUsed: 0,
       blanksCaught: 0,
       blankFalsePositives: 0,
@@ -216,7 +215,9 @@ export default function App() {
     }
     const t = staircaseRef.current.nextTrial();
     if (!t) return null;
-    const d = Math.min(t.d, MAX_D[t.axis]);
+    // NaN-guard: a non-finite difficulty would paint invalid colors
+    const rawD = Number.isFinite(t.d) ? t.d : Math.sqrt(D_FLOOR[t.axis] * MAX_D[t.axis]);
+    const d = Math.min(rawD, MAX_D[t.axis]);
 
     // Blank (catch) plates: same colors/difficulty as a real plate, no
     // chevron. They don't consume staircase trials — a "No arrow" answer is
@@ -248,20 +249,13 @@ export default function App() {
   const advanceTrial = () => {
     const s = sessionRef.current;
 
-    // inject control plates at checkpoints and at the very end
+    // inject control plates at checkpoints; once the staircase is done the
+    // session ends immediately — no extra questions after 100%
     const needControl = s.controlCheckpoints.includes(s.trialNum + 1);
     const next = buildTrial(needControl ? 'control' : 'test');
 
     if (next) {
       setTrial(next);
-      setAnsweredCount(s.trialNum);
-      return;
-    }
-
-    if (!s.finalControlDone) {
-      s.finalControlDone = true;
-      const control = buildTrial('control');
-      setTrial(control);
       setAnsweredCount(s.trialNum);
       return;
     }
@@ -401,8 +395,11 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  const totalTrialsEstimate = 2 * 3 + 8 * 3 + 3; // warmups + adaptive + controls
-  const progressPct = Math.min(100, Math.round((answeredCount / totalTrialsEstimate) * 100));
+  // Worst case: warmups (6) + adaptive (24) + controls (2) + blanks (3).
+  // The bar never shows 100% until the results screen actually appears —
+  // a session that converges early simply ends sooner.
+  const totalTrialsEstimate = 6 + 24 + 2 + 3;
+  const progressPct = Math.min(99, Math.round((answeredCount / totalTrialsEstimate) * 100));
 
   return (
     <div className="min-h-screen bg-[#090C15] text-slate-100 font-sans flex flex-col items-center justify-between p-4 selection:bg-purple-500 selection:text-white relative">

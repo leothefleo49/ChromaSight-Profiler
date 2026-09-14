@@ -182,17 +182,20 @@ test('simulation matrix matches Colorfle constants', () => {
 });
 
 // ---- staircase ----
-test('staircase serves warmups for every axis before adapting', () => {
-  const st = createStaircase();
+test('staircase serves warmups for every axis before adapting, all with finite d', () => {
+  const st = createStaircase({ floors: D_FLOOR, ceilings: MAX_D });
   const seen = new Set();
   for (let i = 0; i < 6; i++) {
     const t = st.nextTrial();
     assert.ok(t.warmup);
+    assert.ok(Number.isFinite(t.d) && t.d > 0, `warmup d must be finite, got ${t.d}`);
+    assert.ok(t.d >= D_FLOOR[t.axis] && t.d <= MAX_D[t.axis], `warmup d in range for ${t.axis}: ${t.d}`);
     seen.add(t.axis);
   }
   assert.equal(seen.size, 3);
   const t7 = st.nextTrial();
   assert.ok(!t7.warmup);
+  assert.ok(Number.isFinite(t7.d));
 });
 
 test('staircase gets harder after two correct, easier after a wrong', () => {
